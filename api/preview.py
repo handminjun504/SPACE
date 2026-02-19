@@ -12,7 +12,10 @@ from http.server import BaseHTTPRequestHandler
 sys.path.insert(0, os.path.dirname(__file__))
 
 from _lib.sheets import extract_sheet_id, get_gspread_client, open_and_read
-from _lib.matcher import run_matching, results_to_json, summary
+from _lib.matcher import (
+    run_matching, results_to_json, summary,
+    detect_changes, changes_to_json, changes_summary,
+)
 
 
 class handler(BaseHTTPRequestHandler):
@@ -81,6 +84,12 @@ class handler(BaseHTTPRequestHandler):
             summary_data = summary(results)
             print(f"[PREVIEW] 매칭 완료: {summary_data} ({time.time()-t0:.1f}s)")
 
+            # 내용 변경 감지 (매칭된 건에서 필드 차이 비교)
+            changes = detect_changes(results)
+            changes_json = changes_to_json(changes)
+            changes_sum = changes_summary(changes)
+            print(f"[PREVIEW] 변경 감지: {changes_sum} ({time.time()-t0:.1f}s)")
+
             self._json(200, {
                 "ok": True,
                 "settlement_title": settlement_title,
@@ -90,6 +99,8 @@ class handler(BaseHTTPRequestHandler):
                 "termination_count": len(termination_data),
                 "summary": summary_data,
                 "results": results_json,
+                "changes": changes_json,
+                "changes_summary": changes_sum,
                 "elapsed_seconds": round(time.time() - t0, 1),
             })
 

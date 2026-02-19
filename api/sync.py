@@ -24,6 +24,7 @@ from _lib.matcher import (
     MatchStatus,
     get_col,
     run_matching,
+    detect_changes,
 )
 
 
@@ -122,11 +123,16 @@ class handler(BaseHTTPRequestHandler):
                     end_dates=end_dates,
                 )
 
+            # 내용 변경 감지 건수
+            changes = detect_changes(results)
+            change_count = len(changes)
+
             self._json(200, {
                 "ok": True,
                 "updated": updated,
                 "skipped": skipped,
-                "message": f"{updated}건 강조 처리 완료 (건너뜀: {skipped}건)",
+                "change_count": change_count,
+                "message": f"{updated}건 종료 처리 완료 (건너뜀: {skipped}건)" + (f" · 내용 변경 {change_count}건 감지됨" if change_count > 0 else ""),
             })
 
         except Exception as e:

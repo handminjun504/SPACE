@@ -44,6 +44,18 @@ NAME_FALLBACK_COLUMNS_SETTLEMENT = []
 ALREADY_TERMINATED_KEYWORDS = ["계약종료", "해지", "종료"]
 TERMINATION_NOTE_TEMPLATE = "계약종료 (만기일: {expiry_date})"
 
+# ============================================================
+# 내용 변경 감지용 필드 매핑
+# (정산 시트 컬럼명, 종료 시트 컬럼명, 표시명, 비교 타입)
+# ============================================================
+FIELD_COMPARISONS = [
+    ("결제금액",       "결제 금액",       "결제금액",     "number"),
+    ("계약시작일자",   "계약 시작 날짜",  "계약시작일",   "date"),
+    ("계약종료일자",   "계약 만기 날짜",  "계약종료일",   "date"),
+    ("사업자등록번호", "사업자 등록번호", "사업자등록번호", "biz_number"),
+    ("호실",          "호실",            "호실",         "text"),
+]
+
 
 class MatchStatus(Enum):
     EXACT = "정확매칭"
@@ -378,6 +390,149 @@ def _cross_verify(result: MatchResult) -> MatchResult:
         result.match_details += " [검증데이터없음]"
 
     return result
+
+
+# ============================================================
+# 내용 변경 감지 (두 시트 간 필드 비교)
+# ============================================================
+
+def _normalize_number(val: str) -> str:
+    """숫자 비교용 정규화: 콤마/공백 제거, 소수점 이하 0 제거"""
+    if not val or not val.strip():
+        return ""
+    cleaned = re.sub(r"[^\d.\-]", "", val.strip())
+    if not cleaned:
+        return ""
+    try:
+        num = float(cleaned)
+        if num == int(num):
+            return str(int(num))
+        return str(num)
+    except ValueError:
+        return cleaned
+
+
+def _normalize_date_str(val: str) -> str:
+    """날짜 비교용 정규화: 다양한 형식 → YYYY-MM-DD"""
+    dt = parse_date(val)
+    if dt:
+        return dt.strftime("%Y-%m-%d")
+    return val.strip() if val else ""
+
+
+def _normalize_for_compare(val: str, compare_type: str) -> str:
+    """비교 타입에 따라 값을 정규화"""
+    if compare_type == "number":
+        return _normalize_number(val)
+    elif compare_type == "date":
+        return _normalize_date_str(val)
+    elif compare_type == "biz_number":
+        return normalize_business_number(val)
+    else:  # text
+        return normalize_text(val)
+
+
+@dataclass
+class FieldDiff:
+    """필드 하나의 변경 내역"""
+    field_name: str           # 표시용 이름 (예: "결제금액")
+    settlement_value: str     # 정산 시트 원본값
+    termination_value: str    # 종료 시트 원본값
+
+
+@dataclass
+class ChangeResult:
+    """매칭된 한 건의 내용 변경 감지 결과"""
+    settlement_index: int
+    termination_index: int
+    branch: str
+    contractor: str
+    room: str
+    diffs: list[FieldDiff]
+    settlement_row: dict = field(default_factory=dict)
+    termination_row: dict = field(default_factory=dict)
+
+
+def detect_changes(
+    match_results: list[MatchResult],
+) -> list[ChangeResult]:
+    """
+    매칭된 건들에서 두 시트 간 내용 차이를 감지합니다.
+    결제금액, 계약시작일, 계약종료일, 사업자등록번호, 호실을 비교합니다.
+    """
+    changes = []
+
+    for r in match_results:
+        if r.settlement_index is None or not r.settlement_row or not r.termination_row:
+            continue
+
+        diffs = []
+        for s_col, t_col, display_name, cmp_type in FIELD_COMPARISONS:
+            s_raw = get_col(r.settlement_row, s_col)
+            t_raw = get_col(r.termination_row, t_col)
+
+            s_norm = _normalize_for_compare(s_raw, cmp_type)
+            t_norm = _normalize_for_compare(t_raw, cmp_type)
+
+            # 둘 다 비어있으면 차이 아님
+            if not s_norm and not t_norm:
+                continue
+
+            # 한쪽만 비어있거나 값이 다르면 변경
+            if s_norm != t_norm:
+                diffs.append(FieldDiff(
+                    field_name=display_name,
+                    settlement_value=s_raw.strip() if s_raw else "(없음)",
+                    termination_value=t_raw.strip() if t_raw else "(없음)",
+                ))
+
+        if diffs:
+            changes.append(ChangeResult(
+                settlement_index=r.settlement_index,
+                termination_index=r.termination_index,
+                branch=get_col(r.termination_row, "지점명"),
+                contractor=extract_name(r.termination_row, "계약자명", NAME_FALLBACK_COLUMNS_TERMINATION),
+                room=get_col(r.termination_row, "호실"),
+                diffs=diffs,
+                settlement_row=r.settlement_row,
+                termination_row=r.termination_row,
+            ))
+
+    return changes
+
+
+def changes_to_json(changes: list[ChangeResult]) -> list[dict]:
+    """ChangeResult 리스트를 JSON 직렬화"""
+    out = []
+    for c in changes:
+        out.append({
+            "settlement_index": c.settlement_index,
+            "termination_index": c.termination_index,
+            "branch": c.branch,
+            "contractor": c.contractor,
+            "room": c.room,
+            "diffs": [
+                {
+                    "field": d.field_name,
+                    "settlement": d.settlement_value,
+                    "termination": d.termination_value,
+                }
+                for d in c.diffs
+            ],
+        })
+    return out
+
+
+def changes_summary(changes: list[ChangeResult]) -> dict:
+    """변경 감지 요약"""
+    field_counts = defaultdict(int)
+    for c in changes:
+        for d in c.diffs:
+            field_counts[d.field_name] += 1
+    return {
+        "total_changed": len(changes),
+        "by_field": dict(field_counts),
+    }
 
 
 # ============================================================

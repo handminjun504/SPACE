@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>스페이스액스키 계약 종료 동기화</title>
+  <title>스페이스액스키 계약 종료 · 변경 관리</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📋</text></svg>">
   <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
   <style>
@@ -46,14 +46,26 @@
     @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
     .toast-success { background: rgba(34,197,94,.9); color: #fff; }
     .toast-error { background: rgba(239,68,68,.9); color: #fff; }
+    /* 내용 변경 감지 */
+    .badge-change { background: rgba(168,85,247,.15); color: #a855f7; }
+    .diff-old { color: var(--danger); text-decoration: line-through; }
+    .diff-new { color: var(--success); font-weight: 600; }
+    .diff-arrow { color: var(--muted); margin: 0 4px; }
+    .change-card { background: rgba(168,85,247,.04); border: 1px solid rgba(168,85,247,.2); border-radius: 10px; padding: 12px 16px; margin-bottom: 8px; }
+    .change-field { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; background: rgba(168,85,247,.1); color: #a855f7; margin-right: 6px; }
+    .tab-btn { padding: 10px 20px; border: none; background: transparent; color: var(--muted); font-weight: 600; cursor: pointer; border-bottom: 2px solid transparent; transition: all .15s; }
+    .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+    .tab-btn:hover:not(.active) { color: var(--text); }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
   </style>
 </head>
 <body class="p-4 md:p-8">
   <div class="max-w-5xl mx-auto">
     <!-- 헤더 -->
     <div class="text-center mb-8">
-      <h1 class="text-2xl md:text-3xl font-bold mb-2">스페이스액스키 계약 종료 동기화</h1>
-      <p class="text-sm" style="color:var(--muted)">종료 시트의 계약 건을 정산 시트에서 자동 매칭하여 강조 표시합니다</p>
+      <h1 class="text-2xl md:text-3xl font-bold mb-2">스페이스액스키 계약 종료 · 변경 관리</h1>
+      <p class="text-sm" style="color:var(--muted)">종료 시트의 계약 건을 정산 시트에서 자동 매칭하여 강조 표시하고, 내용 변경도 감지합니다</p>
     </div>
 
     <!-- 진행 바 -->
@@ -118,7 +130,7 @@
         <p class="text-sm mb-4" style="color:var(--muted)" id="sheetInfoText"></p>
 
         <!-- 통계 카드 -->
-        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6" id="statsCards">
+        <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6" id="statsCards">
           <div class="stat-card" style="background:rgba(59,130,246,.08)">
             <div class="stat-num" style="color:var(--accent)" id="statTotal">0</div>
             <div class="stat-label">전체</div>
@@ -135,31 +147,53 @@
             <div class="stat-num" style="color:var(--danger)" id="statFail">0</div>
             <div class="stat-label">매칭실패</div>
           </div>
+          <div class="stat-card" style="background:rgba(168,85,247,.08)">
+            <div class="stat-num" style="color:#a855f7" id="statChanges">0</div>
+            <div class="stat-label">내용변경</div>
+          </div>
         </div>
 
-        <!-- 결과 테이블 -->
-        <div class="overflow-x-auto">
-          <table>
-            <thead>
-              <tr>
-                <th class="check-col"><input type="checkbox" id="selectAll" onchange="toggleAll()"></th>
-                <th>상태</th>
-                <th>종료 시트 (지점/계약자/호실)</th>
-                <th>정산 시트 (지점/계약자/호실)</th>
-                <th>만기일</th>
-                <th>신뢰도</th>
-              </tr>
-            </thead>
-            <tbody id="resultsBody"></tbody>
-          </table>
+        <!-- 탭 메뉴 -->
+        <div style="border-bottom:1px solid var(--border);margin-bottom:16px">
+          <button class="tab-btn active" onclick="switchTab('termination')">📋 계약 종료 (<span id="tabTermCount">0</span>)</button>
+          <button class="tab-btn" onclick="switchTab('changes')">🔄 내용 변경 (<span id="tabChangeCount">0</span>)</button>
         </div>
-      </div>
 
-      <div class="flex gap-3 justify-end">
-        <button class="btn btn-outline" onclick="selectExactOnly()">정확매칭만 선택</button>
-        <button class="btn btn-danger" onclick="doSync()" id="syncBtn">
-          선택 건 동기화 실행 (배경색 + 취소선)
-        </button>
+        <!-- 탭 1: 계약 종료 테이블 -->
+        <div id="tabTermination" class="tab-content active">
+          <div class="overflow-x-auto">
+            <table>
+              <thead>
+                <tr>
+                  <th class="check-col"><input type="checkbox" id="selectAll" onchange="toggleAll()"></th>
+                  <th>상태</th>
+                  <th>종료 시트 (지점/계약자/호실)</th>
+                  <th>정산 시트 (지점/계약자/호실)</th>
+                  <th>만기일</th>
+                  <th>신뢰도</th>
+                </tr>
+              </thead>
+              <tbody id="resultsBody"></tbody>
+            </table>
+          </div>
+          <div class="flex gap-3 justify-end mt-4">
+            <button class="btn btn-outline" onclick="selectExactOnly()">정확매칭만 선택</button>
+            <button class="btn btn-danger" onclick="doSync()" id="syncBtn">
+              선택 건 동기화 실행 (배경색 + 취소선)
+            </button>
+          </div>
+        </div>
+
+        <!-- 탭 2: 내용 변경 테이블 -->
+        <div id="tabChanges" class="tab-content">
+          <div id="changesEmpty" style="display:none;text-align:center;padding:40px;color:var(--muted)">
+            <p>🎉 모든 매칭 건의 내용이 동일합니다. 변경 사항이 없습니다.</p>
+          </div>
+          <div id="changesList"></div>
+          <div id="changesActions" class="flex gap-3 justify-end mt-4" style="display:none">
+            <button class="btn btn-outline" onclick="copyChangesText()">📋 변경 내역 복사</button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -264,13 +298,21 @@
     // ======================== STEP 3: 결과 렌더링 ========================
     function renderResults(data) {
       document.getElementById('sheetInfoText').textContent =
-        `정산: "${data.settlement_title}" (${data.settlement_count}행) · 종료: "${data.termination_title}" (${data.termination_count}행)`;
+        `정산: "${data.settlement_title}" (${data.settlement_count}행) · 종료: "${data.termination_title}" (${data.termination_count}행)` +
+        (data.elapsed_seconds ? ` · ${data.elapsed_seconds}초` : '');
 
       document.getElementById('statTotal').textContent = data.summary.total;
       document.getElementById('statExact').textContent = data.summary.exact;
       document.getElementById('statFuzzy').textContent = data.summary.fuzzy;
       document.getElementById('statFail').textContent = data.summary.unmatched;
 
+      // 내용 변경 통계
+      const changeCount = data.changes_summary ? data.changes_summary.total_changed : 0;
+      document.getElementById('statChanges').textContent = changeCount;
+      document.getElementById('tabTermCount').textContent = data.summary.total;
+      document.getElementById('tabChangeCount').textContent = changeCount;
+
+      // ---- 탭 1: 계약 종료 테이블 ----
       const tbody = document.getElementById('resultsBody');
       tbody.innerHTML = '';
 
@@ -296,6 +338,79 @@
             <td>${isMatch ? r.confidence + '%' : '-'}</td>
           </tr>`;
       });
+
+      // ---- 탭 2: 내용 변경 목록 ----
+      renderChanges(data.changes || []);
+    }
+
+    function renderChanges(changes) {
+      const container = document.getElementById('changesList');
+      const emptyMsg = document.getElementById('changesEmpty');
+      const actions = document.getElementById('changesActions');
+      container.innerHTML = '';
+
+      if (!changes || changes.length === 0) {
+        emptyMsg.style.display = 'block';
+        actions.style.display = 'none';
+        return;
+      }
+
+      emptyMsg.style.display = 'none';
+      actions.style.display = 'flex';
+
+      changes.forEach((c, idx) => {
+        let diffsHtml = '';
+        c.diffs.forEach(d => {
+          diffsHtml += `
+            <div style="margin:4px 0;font-size:14px">
+              <span class="change-field">${esc(d.field)}</span>
+              <span class="diff-old">${esc(d.settlement)}</span>
+              <span class="diff-arrow">→</span>
+              <span class="diff-new">${esc(d.termination)}</span>
+            </div>`;
+        });
+
+        container.innerHTML += `
+          <div class="change-card fade-in">
+            <div class="flex items-center gap-2 mb-2">
+              <span class="badge badge-change">변경 ${idx + 1}</span>
+              <span class="font-medium">${esc(c.branch)}</span>
+              <span style="color:var(--muted)">·</span>
+              <span>${esc(c.contractor)}</span>
+              <span style="color:var(--muted)">· ${esc(c.room || '-')}</span>
+            </div>
+            ${diffsHtml}
+          </div>`;
+      });
+    }
+
+    // 탭 전환
+    function switchTab(tabName) {
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+
+      if (tabName === 'termination') {
+        document.querySelectorAll('.tab-btn')[0].classList.add('active');
+        document.getElementById('tabTermination').classList.add('active');
+      } else {
+        document.querySelectorAll('.tab-btn')[1].classList.add('active');
+        document.getElementById('tabChanges').classList.add('active');
+      }
+    }
+
+    // 변경 내역 텍스트 복사
+    function copyChangesText() {
+      if (!previewData || !previewData.changes) return;
+      let text = '=== 내용 변경 감지 결과 ===\n\n';
+      previewData.changes.forEach((c, idx) => {
+        text += `[${idx + 1}] ${c.branch} / ${c.contractor} / ${c.room || '-'}\n`;
+        c.diffs.forEach(d => {
+          text += `  ${d.field}: "${d.settlement}" → "${d.termination}"\n`;
+        });
+        text += '\n';
+      });
+      text += `총 ${previewData.changes.length}건 변경 감지됨`;
+      navigator.clipboard.writeText(text).then(() => toast('변경 내역이 클립보드에 복사되었습니다'));
     }
 
     function toggleAll() {
