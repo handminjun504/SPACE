@@ -1,11 +1,15 @@
 """
-매칭 엔진 모듈 (Vercel 서버리스용) — 초고속 v4
+매칭 엔진 모듈 (Vercel 서버리스용) — v5 (날짜 기준 매칭)
+
+매칭 전략:
+  Phase 1 (정확): 지점 + 이름 + 호실 완전 일치
+  Phase 2 (날짜): 지점 + 계약시작일 + 계약만기일 완전 일치 → 이름 유사도 확인
+  Phase 3 (퍼지): 지점 내 이름+호실+날짜 종합 유사도
 
 대규모 데이터 대응 (정산 12,831행 × 종료 8,329행):
-- 정확 매칭: 사전 인덱스 → O(1) 룩업
-- 퍼지 매칭: rapidfuzz.process.extractOne (C 확장) + 지점 그룹핑
-  → 수동 루프 대비 10~50배 빠름
-- 시간 제한: 15초 (안전 마진 확보)
+- 사전 인덱스 + O(1) 룩업
+- rapidfuzz.process.extractOne (C 확장)
+- 시간 제한: 15초 (안전 마진)
 """
 
 import re
@@ -21,19 +25,42 @@ from rapidfuzz import fuzz, process as rfprocess
 # ============================================================
 # 설정 상수
 # ============================================================
-FUZZY_THRESHOLD = 80
-FUZZY_TIME_LIMIT = 15  # 퍼지 매칭 최대 시간 (초)
+FUZZY_THRESHOLD = 75          # 종합 매칭 임계값 (%)
+FUZZY_TIME_LIMIT = 15         # 퍼지 매칭 최대 시간 (초)
+DATE_MATCH_NAME_THRESHOLD = 40  # 날짜 매칭 시 이름 유사도 최소값
+
 NORMALIZE_REMOVE_CHARS = [" ", "\t", "\n", "-", ".", "(", ")", "\u3000"]
 DATE_FORMATS = [
     "%Y-%m-%d", "%Y.%m.%d", "%Y/%m/%d", "%Y%m%d",
     "%y-%m-%d", "%y.%m.%d", "%y/%m/%d",
 ]
+
+# 이름 폴백 컬럼 (계약자명이 비어있을 때 대체로 사용)
 NAME_FALLBACK_COLUMNS_TERMINATION = ["주민 번호", "상호"]
 NAME_FALLBACK_COLUMNS_SETTLEMENT = []
+
+# 이미 종료 처리된 건 키워드
 ALREADY_TERMINATED_KEYWORDS = ["계약종료", "해지", "종료"]
 TERMINATION_NOTE_TEMPLATE = "계약종료 (만기일: {expiry_date})"
 
-# 내용 변경 감지용 필드 매핑
+# 컬럼명 매핑 (정산 시트 → 종료 시트)
+# 정산 시트 컬럼명, 종료 시트 컬럼명
+COL_SETTLEMENT_BRANCH = "지점명"
+COL_SETTLEMENT_NAME = "계약자명"
+COL_SETTLEMENT_ROOM = "호실"
+COL_SETTLEMENT_START_DATE = "계약시작일자"
+COL_SETTLEMENT_END_DATE = "계약종료일자"
+COL_SETTLEMENT_BIZ_NUM = "사업자등록번호"
+COL_SETTLEMENT_NOTE = "계약변경/해지/비고"
+
+COL_TERMINATION_BRANCH = "지점명"
+COL_TERMINATION_NAME = "계약자명"
+COL_TERMINATION_ROOM = "호실"
+COL_TERMINATION_START_DATE = "계약 시작 날짜"
+COL_TERMINATION_END_DATE = "계약 만기 날짜"
+COL_TERMINATION_BIZ_NUM = "사업자 등록번호"
+
+# 내용 변경 감지용 필드 매핑 (정산컬럼, 종료컬럼, 표시이름, 비교타입)
 FIELD_COMPARISONS = [
     ("결제금액",       "결제 금액",       "결제금액",     "number"),
     ("계약시작일자",   "계약 시작 날짜",  "계약시작일",   "date"),
@@ -123,6 +150,14 @@ def parse_date(date_str) -> Optional[datetime]:
     return None
 
 
+def normalize_date_str(date_str) -> str:
+    """날짜를 'YYYYMMDD' 형태의 정규화 문자열로 변환 (매칭 키 용도)"""
+    dt = parse_date(date_str)
+    if dt:
+        return dt.strftime("%Y%m%d")
+    return ""
+
+
 def get_col(row: dict, col_name: str) -> str:
     if col_name in row:
         return str(row[col_name]) if row[col_name] is not None else ""
@@ -145,7 +180,7 @@ def extract_name(row: dict, name_col: str, fallback_cols: list) -> str:
 
 
 # ============================================================
-# 사전 정규화 인덱스
+# 사전 정규화 인덱스 (PreparedRow)
 # ============================================================
 
 @dataclass
@@ -156,28 +191,38 @@ class PreparedRow:
     name_raw: str
     name_norm: str
     room_norm: str
+    start_date: str  # "YYYYMMDD" 또는 ""
+    end_date: str    # "YYYYMMDD" 또는 ""
 
 
 def _prepare_settlement(data: list[dict]) -> tuple[
-    dict[tuple, list[PreparedRow]],
-    dict[str, list[PreparedRow]],
+    dict[tuple, list[PreparedRow]],    # exact_index: (branch, name) → rows
+    dict[str, list[PreparedRow]],      # branch_index: branch → rows
+    dict[tuple, list[PreparedRow]],    # date_index: (branch, start, end) → rows
 ]:
     exact_index = defaultdict(list)
     branch_index = defaultdict(list)
+    date_index = defaultdict(list)
 
     for idx, row in enumerate(data):
         pr = PreparedRow(
             idx=idx, row=row,
-            branch_norm=normalize_text(get_col(row, "지점명")),
-            name_raw=extract_name(row, "계약자명", NAME_FALLBACK_COLUMNS_SETTLEMENT),
+            branch_norm=normalize_text(get_col(row, COL_SETTLEMENT_BRANCH)),
+            name_raw=extract_name(row, COL_SETTLEMENT_NAME, NAME_FALLBACK_COLUMNS_SETTLEMENT),
             name_norm="",
-            room_norm=normalize_text(get_col(row, "호실")),
+            room_norm=normalize_text(get_col(row, COL_SETTLEMENT_ROOM)),
+            start_date=normalize_date_str(get_col(row, COL_SETTLEMENT_START_DATE)),
+            end_date=normalize_date_str(get_col(row, COL_SETTLEMENT_END_DATE)),
         )
         pr.name_norm = normalize_name(pr.name_raw)
         exact_index[(pr.branch_norm, pr.name_norm)].append(pr)
         branch_index[pr.branch_norm].append(pr)
 
-    return exact_index, branch_index
+        # 날짜 인덱스: 지점 + 시작일 + 종료일 (모두 있는 경우만)
+        if pr.branch_norm and pr.start_date and pr.end_date:
+            date_index[(pr.branch_norm, pr.start_date, pr.end_date)].append(pr)
+
+    return exact_index, branch_index, date_index
 
 
 def _prepare_termination(data: list[dict]) -> list[PreparedRow]:
@@ -185,10 +230,12 @@ def _prepare_termination(data: list[dict]) -> list[PreparedRow]:
     for idx, row in enumerate(data):
         pr = PreparedRow(
             idx=idx, row=row,
-            branch_norm=normalize_text(get_col(row, "지점명")),
-            name_raw=extract_name(row, "계약자명", NAME_FALLBACK_COLUMNS_TERMINATION),
+            branch_norm=normalize_text(get_col(row, COL_TERMINATION_BRANCH)),
+            name_raw=extract_name(row, COL_TERMINATION_NAME, NAME_FALLBACK_COLUMNS_TERMINATION),
             name_norm="",
-            room_norm=normalize_text(get_col(row, "호실")),
+            room_norm=normalize_text(get_col(row, COL_TERMINATION_ROOM)),
+            start_date=normalize_date_str(get_col(row, COL_TERMINATION_START_DATE)),
+            end_date=normalize_date_str(get_col(row, COL_TERMINATION_END_DATE)),
         )
         pr.name_norm = normalize_name(pr.name_raw)
         result.append(pr)
@@ -200,26 +247,17 @@ def _prepare_termination(data: list[dict]) -> list[PreparedRow]:
 # ============================================================
 
 def _build_fuzzy_index(branch_index: dict[str, list[PreparedRow]]) -> dict[str, tuple[list[str], list[PreparedRow]]]:
-    """
-    지점별로 (이름 리스트, PreparedRow 리스트) 쌍을 만듦.
-    rapidfuzz.process.extractOne은 choices 리스트를 받으므로
-    인덱스를 통해 원본 행을 역추적할 수 있어야 함.
-    """
     fuzzy_idx = {}
     for branch_norm, rows in branch_index.items():
         if not branch_norm:
             continue
-        names = []
-        prs = []
-        for pr in rows:
-            names.append(pr.name_norm)
-            prs.append(pr)
-        fuzzy_idx[branch_norm] = (names, prs)
+        names = [pr.name_norm for pr in rows]
+        fuzzy_idx[branch_norm] = (names, rows)
     return fuzzy_idx
 
 
 # ============================================================
-# 매칭 엔진 v4
+# 매칭 엔진 v5 (날짜 기반 매칭 추가)
 # ============================================================
 
 def run_matching(
@@ -229,15 +267,15 @@ def run_matching(
 ) -> list[MatchResult]:
     t0 = time.time()
 
-    exact_index, branch_index = _prepare_settlement(settlement_data)
+    exact_index, branch_index, date_index = _prepare_settlement(settlement_data)
     t_prepared = _prepare_termination(termination_data)
     fuzzy_idx = _build_fuzzy_index(branch_index)
 
     results = []
     matched_indices: set[int] = set()
 
-    # Phase 1: 정확 매칭
-    unmatched_t = []
+    # === Phase 1: 정확 매칭 (지점 + 이름 + 호실) ===
+    unmatched_after_exact = []
     for tp in t_prepared:
         result = _exact_match(tp, exact_index, matched_indices)
         if result is not None:
@@ -245,17 +283,25 @@ def run_matching(
             matched_indices.add(result.settlement_index)
             results.append(result)
         else:
-            unmatched_t.append(tp)
+            unmatched_after_exact.append(tp)
 
-    # Phase 2: 퍼지 매칭 (rapidfuzz.process.extractOne 사용)
+    # === Phase 2: 날짜 기반 매칭 (지점 + 시작일 + 만기일 일치 → 이름 유사도 확인) ===
+    unmatched_after_date = []
+    for tp in unmatched_after_exact:
+        result = _date_match(tp, date_index, matched_indices)
+        if result is not None:
+            result = _cross_verify(result)
+            matched_indices.add(result.settlement_index)
+            results.append(result)
+        else:
+            unmatched_after_date.append(tp)
+
+    # === Phase 3: 퍼지 매칭 (rapidfuzz) ===
     fuzzy_start = time.time()
-    fuzzy_timeout = False
-
-    for tp in unmatched_t:
+    for tp in unmatched_after_date:
         if time.time() - fuzzy_start > FUZZY_TIME_LIMIT:
-            fuzzy_timeout = True
-            idx_pos = unmatched_t.index(tp)
-            for remaining in unmatched_t[idx_pos:]:
+            idx_pos = unmatched_after_date.index(tp)
+            for remaining in unmatched_after_date[idx_pos:]:
                 results.append(MatchResult(
                     termination_index=remaining.idx,
                     settlement_index=None,
@@ -285,25 +331,42 @@ def run_matching(
     return results
 
 
+# ============================================================
+# Phase 1: 정확 매칭 (지점 + 이름 [+ 호실])
+# ============================================================
+
 def _exact_match(tp: PreparedRow, exact_index, matched) -> Optional[MatchResult]:
     if not tp.branch_norm and not tp.name_norm:
         return None
 
-    original = get_col(tp.row, "계약자명")
+    original = get_col(tp.row, COL_TERMINATION_NAME)
     used_fb = (not original.strip()) and tp.name_raw.strip()
-    fb_note = " (주민번호칸 이름)" if used_fb else ""
+    fb_note = " (폴백이름)" if used_fb else ""
 
     candidates = exact_index.get((tp.branch_norm, tp.name_norm), [])
 
+    # 1차: 지점+이름+호실+날짜 모두 일치
+    for sp in candidates:
+        if sp.idx not in matched and tp.room_norm == sp.room_norm:
+            if tp.start_date and sp.start_date and tp.start_date == sp.start_date:
+                return MatchResult(
+                    termination_index=tp.idx, settlement_index=sp.idx,
+                    status=MatchStatus.EXACT, confidence=100.0,
+                    match_details=f"정확매칭: {tp.branch_norm}/{tp.name_raw}{fb_note}/{tp.room_norm}/시작일일치",
+                    termination_row=tp.row, settlement_row=sp.row,
+                )
+
+    # 2차: 지점+이름+호실 일치 (날짜 무관)
     for sp in candidates:
         if sp.idx not in matched and tp.room_norm == sp.room_norm:
             return MatchResult(
                 termination_index=tp.idx, settlement_index=sp.idx,
-                status=MatchStatus.EXACT, confidence=100.0,
+                status=MatchStatus.EXACT, confidence=98.0,
                 match_details=f"정확매칭: {tp.branch_norm}/{tp.name_raw}{fb_note}/{tp.room_norm}",
                 termination_row=tp.row, settlement_row=sp.row,
             )
 
+    # 3차: 지점+이름 일치, 호실 한쪽이 비어있음
     if not tp.room_norm:
         for sp in candidates:
             if sp.idx not in matched:
@@ -317,13 +380,88 @@ def _exact_match(tp: PreparedRow, exact_index, matched) -> Optional[MatchResult]
     return None
 
 
+# ============================================================
+# Phase 2: 날짜 기반 매칭 (지점 + 시작일 + 만기일 → 이름 유사도 확인)
+# ============================================================
+
+def _date_match(tp: PreparedRow, date_index, matched) -> Optional[MatchResult]:
+    """
+    지점명 + 계약 시작일 + 계약 만기일이 동일한 정산 건을 찾고,
+    이름 유사도가 최소 기준 이상이면 매칭으로 판정합니다.
+    날짜가 정확히 일치하면 동일 계약일 가능성이 매우 높습니다.
+    """
+    if not tp.branch_norm or not tp.start_date or not tp.end_date:
+        return None
+
+    candidates = date_index.get((tp.branch_norm, tp.start_date, tp.end_date), [])
+    if not candidates:
+        return None
+
+    best_sp = None
+    best_name_score = 0
+
+    for sp in candidates:
+        if sp.idx in matched:
+            continue
+
+        # 이름 유사도 체크
+        if tp.name_norm and sp.name_norm:
+            name_score = fuzz.ratio(tp.name_norm, sp.name_norm)
+        elif not tp.name_norm and not sp.name_norm:
+            name_score = 100  # 둘 다 이름이 없으면 매칭 허용
+        else:
+            name_score = 0
+
+        # 호실도 일치하면 보너스
+        if tp.room_norm and sp.room_norm and tp.room_norm == sp.room_norm:
+            name_score = min(100, name_score + 20)
+
+        if name_score > best_name_score:
+            best_name_score = name_score
+            best_sp = sp
+
+    if best_sp is None:
+        return None
+
+    # 이름 유사도가 너무 낮으면 매칭 거부
+    if best_name_score < DATE_MATCH_NAME_THRESHOLD:
+        return None
+
+    original = get_col(tp.row, COL_TERMINATION_NAME)
+    fb = " [이름폴백]" if (not original.strip()) and tp.name_raw.strip() else ""
+    detail = (
+        f"날짜매칭: {tp.branch_norm}/"
+        f"시작={tp.start_date[:4]}-{tp.start_date[4:6]}-{tp.start_date[6:]}/"
+        f"만기={tp.end_date[:4]}-{tp.end_date[4:6]}-{tp.end_date[6:]}/"
+        f"이름유사도={best_name_score:.0f}%{fb}"
+    )
+
+    # 날짜 완전 일치 + 이름 유사도에 따라 신뢰도 결정
+    if best_name_score >= 80:
+        confidence = 95.0
+        status = MatchStatus.EXACT
+    elif best_name_score >= 60:
+        confidence = 85.0
+        status = MatchStatus.EXACT
+    else:
+        confidence = 75.0
+        status = MatchStatus.FUZZY
+
+    return MatchResult(
+        termination_index=tp.idx, settlement_index=best_sp.idx,
+        status=status, confidence=confidence,
+        match_details=detail,
+        termination_row=tp.row, settlement_row=best_sp.row,
+    )
+
+
+# ============================================================
+# Phase 3: 퍼지 매칭 (rapidfuzz + 날짜 보너스)
+# ============================================================
+
 def _fuzzy_match_fast(
     tp: PreparedRow, fuzzy_idx, matched, threshold,
 ) -> Optional[MatchResult]:
-    """
-    rapidfuzz.process.extractOne 기반 초고속 퍼지 매칭
-    C 확장으로 수백 개 문자열을 한 번에 비교 → 수동 루프 대비 10~50x 빠름
-    """
     if not tp.branch_norm or not tp.name_norm:
         return None
 
@@ -333,10 +471,8 @@ def _fuzzy_match_fast(
 
     names, prs = entry
 
-    # rapidfuzz.process.extractOne: 최적의 매칭을 C 레벨에서 찾음
-    # score_cutoff으로 미리 걸러냄
-    # 이름 매칭 최소 점수: threshold에서 지점(30%)+호실(최대20%) 제외 → 이름만 60% 이상
-    name_cutoff = max(40, int((threshold - 30 - 20) / 0.5))
+    # 이름 최소 점수 (낮게 설정하여 날짜 보너스 가능성 확보)
+    name_cutoff = max(30, int(threshold * 0.4))
 
     best_match = rfprocess.extractOne(
         tp.name_norm, names,
@@ -351,7 +487,6 @@ def _fuzzy_match_fast(
     sp = prs[match_idx]
 
     if sp.idx in matched:
-        # 최고 매칭이 이미 사용된 경우, 차선책 검색
         candidates = rfprocess.extract(
             tp.name_norm, names,
             scorer=fuzz.ratio,
@@ -374,14 +509,28 @@ def _fuzzy_match_fast(
     else:
         rm = 100
 
-    total = 100 * 0.3 + name_score * 0.5 + rm * 0.2
+    # 날짜 보너스 (v5 신규)
+    date_bonus = 0
+    date_detail = ""
+    if tp.start_date and sp.start_date and tp.start_date == sp.start_date:
+        date_bonus += 10
+        date_detail += "시작일일치"
+    if tp.end_date and sp.end_date and tp.end_date == sp.end_date:
+        date_bonus += 10
+        date_detail += "+만기일일치" if date_detail else "만기일일치"
+
+    # 종합 점수: 지점(30%) + 이름(35%) + 호실(15%) + 날짜보너스(최대 20%)
+    total = 100 * 0.30 + name_score * 0.35 + rm * 0.15 + date_bonus
 
     if total < threshold:
         return None
 
-    original = get_col(tp.row, "계약자명")
+    original = get_col(tp.row, COL_TERMINATION_NAME)
     fb = " [이름폴백]" if (not original.strip()) and tp.name_raw.strip() else ""
-    detail = f"유사매칭: 지점=100%, 계약자={name_score:.0f}%{fb}, 호실={rm:.0f}% → {total:.1f}%"
+    detail = f"유사매칭: 지점=100%, 이름={name_score:.0f}%{fb}, 호실={rm:.0f}%"
+    if date_detail:
+        detail += f", {date_detail}"
+    detail += f" → {total:.1f}%"
 
     return MatchResult(
         termination_index=tp.idx, settlement_index=sp.idx,
@@ -391,17 +540,30 @@ def _fuzzy_match_fast(
     )
 
 
+# ============================================================
+# 교차 검증
+# ============================================================
+
 def _cross_verify(result: MatchResult) -> MatchResult:
     verified = []
-    t_biz = normalize_business_number(get_col(result.termination_row, "사업자 등록번호"))
-    s_biz = normalize_business_number(get_col(result.settlement_row, "사업자등록번호"))
+
+    # 사업자 번호
+    t_biz = normalize_business_number(get_col(result.termination_row, COL_TERMINATION_BIZ_NUM))
+    s_biz = normalize_business_number(get_col(result.settlement_row, COL_SETTLEMENT_BIZ_NUM))
     if t_biz and s_biz:
         verified.append("사업자번호일치" if t_biz == s_biz else "사업자번호불일치")
 
-    t_date = parse_date(get_col(result.termination_row, "계약 시작 날짜"))
-    s_date = parse_date(get_col(result.settlement_row, "계약시작일자"))
+    # 계약 시작일
+    t_date = parse_date(get_col(result.termination_row, COL_TERMINATION_START_DATE))
+    s_date = parse_date(get_col(result.settlement_row, COL_SETTLEMENT_START_DATE))
     if t_date and s_date:
-        verified.append("계약시작일일치" if t_date == s_date else "계약시작일불일치")
+        verified.append("시작일일치" if t_date == s_date else "시작일불일치")
+
+    # 계약 만기일
+    t_end = parse_date(get_col(result.termination_row, COL_TERMINATION_END_DATE))
+    s_end = parse_date(get_col(result.settlement_row, COL_SETTLEMENT_END_DATE))
+    if t_end and s_end:
+        verified.append("만기일일치" if t_end == s_end else "만기일불일치")
 
     has_ok = any("일치" in v and "불일치" not in v for v in verified)
     has_ng = any("불일치" in v for v in verified)
@@ -495,9 +657,9 @@ def detect_changes(match_results: list[MatchResult]) -> list[ChangeResult]:
             changes.append(ChangeResult(
                 settlement_index=r.settlement_index,
                 termination_index=r.termination_index,
-                branch=get_col(r.termination_row, "지점명"),
-                contractor=extract_name(r.termination_row, "계약자명", NAME_FALLBACK_COLUMNS_TERMINATION),
-                room=get_col(r.termination_row, "호실"),
+                branch=get_col(r.termination_row, COL_TERMINATION_BRANCH),
+                contractor=extract_name(r.termination_row, COL_TERMINATION_NAME, NAME_FALLBACK_COLUMNS_TERMINATION),
+                room=get_col(r.termination_row, COL_TERMINATION_ROOM),
                 diffs=diffs,
                 settlement_row=r.settlement_row,
                 termination_row=r.termination_row,
@@ -536,16 +698,17 @@ def results_to_json(results: list[MatchResult]) -> list[dict]:
         "confidence": round(r.confidence, 1),
         "match_details": r.match_details,
         "verification_passed": r.verification_passed,
-        "t_branch": get_col(r.termination_row, "지점명"),
-        "t_contractor": extract_name(r.termination_row, "계약자명", NAME_FALLBACK_COLUMNS_TERMINATION),
-        "t_room": get_col(r.termination_row, "호실"),
-        "t_expiry": get_col(r.termination_row, "계약 만기 날짜"),
-        "t_biz_num": get_col(r.termination_row, "사업자 등록번호"),
-        "s_branch": get_col(r.settlement_row, "지점명") if r.settlement_row else "",
-        "s_contractor": get_col(r.settlement_row, "계약자명") if r.settlement_row else "",
-        "s_room": get_col(r.settlement_row, "호실") if r.settlement_row else "",
-        "s_biz_num": get_col(r.settlement_row, "사업자등록번호") if r.settlement_row else "",
-        "s_note": get_col(r.settlement_row, "계약변경/해지/비고") if r.settlement_row else "",
+        "t_branch": get_col(r.termination_row, COL_TERMINATION_BRANCH),
+        "t_contractor": extract_name(r.termination_row, COL_TERMINATION_NAME, NAME_FALLBACK_COLUMNS_TERMINATION),
+        "t_room": get_col(r.termination_row, COL_TERMINATION_ROOM),
+        "t_expiry": get_col(r.termination_row, COL_TERMINATION_END_DATE),
+        "t_start": get_col(r.termination_row, COL_TERMINATION_START_DATE),
+        "t_biz_num": get_col(r.termination_row, COL_TERMINATION_BIZ_NUM),
+        "s_branch": get_col(r.settlement_row, COL_SETTLEMENT_BRANCH) if r.settlement_row else "",
+        "s_contractor": get_col(r.settlement_row, COL_SETTLEMENT_NAME) if r.settlement_row else "",
+        "s_room": get_col(r.settlement_row, COL_SETTLEMENT_ROOM) if r.settlement_row else "",
+        "s_biz_num": get_col(r.settlement_row, COL_SETTLEMENT_BIZ_NUM) if r.settlement_row else "",
+        "s_note": get_col(r.settlement_row, COL_SETTLEMENT_NOTE) if r.settlement_row else "",
     } for r in results]
 
 
