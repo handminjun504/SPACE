@@ -332,20 +332,50 @@ class handler(BaseHTTPRequestHandler):
                     "room_overlap": len(room_overlap),
                 }
 
-                # 모든 지점의 처음 5개 이름 샘플 표시
-                entry["t_name_samples"] = sorted(list(t_name_set))[:5]
-                entry["s_name_samples"] = sorted(list(s_name_set))[:5]
-                entry["t_raw_samples"] = [e["raw_name"] for e in t_names_by_branch[bn][:5]]
-                entry["s_raw_samples"] = [e["raw_name"] for e in s_names_by_branch[bn][:5]]
+                # 이름 샘플: 한글 이름만 필터 (전화번호/주민번호 제외)
+                import re as _re
+                korean_t = sorted([n for n in t_name_set if _re.match(r'^[가-힣]{2,5}$', n)])
+                korean_s = sorted([n for n in s_name_set if _re.match(r'^[가-힣]{2,5}$', n)])
+                entry["t_korean_names"] = len(korean_t)
+                entry["s_korean_names"] = len(korean_s)
+                entry["t_korean_sample"] = korean_t[:10]
+                entry["s_korean_sample"] = korean_s[:10]
+                korean_overlap = set(korean_t) & set(korean_s)
+                entry["korean_overlap"] = len(korean_overlap)
+                if korean_overlap:
+                    entry["korean_overlap_names"] = sorted(list(korean_overlap))[:10]
                 
-                if overlap:
-                    entry["overlap_names"] = sorted(list(overlap))[:10]
+                # Raw 이름 (첫 5행)
+                entry["t_raw_first5"] = [e["raw_name"] for e in t_names_by_branch[bn][:5]]
+                entry["s_raw_first5"] = [e["raw_name"] for e in s_names_by_branch[bn][:5]]
 
                 branch_analysis.append(entry)
+
+            # 정산 시트 날짜 범위 확인
+            s_dates = []
+            for r in s_data[:100]:  # 첫 100행만
+                d = get_col(r, "계약시작일자")
+                if d.strip():
+                    s_dates.append(d.strip())
+            t_dates = []
+            for r in t_data[:100]:
+                d = get_col(r, "계약 시작 날짜")
+                if d.strip():
+                    t_dates.append(d.strip())
+            
+            # 정산 시트 계약월 확인
+            s_months = set()
+            for r in s_data[:200]:
+                m = get_col(r, "계약월(자동)")
+                if m.strip():
+                    s_months.add(m.strip())
 
             steps.append({
                 "step": "name_debug", "ok": True,
                 "branch_count": len(branch_analysis),
+                "s_date_range": {"first": s_dates[:3], "last": s_dates[-3:]},
+                "t_date_range": {"first": t_dates[:3], "last": t_dates[-3:]},
+                "s_months_sample": sorted(list(s_months))[:10],
                 "branches": branch_analysis,
                 "elapsed_s": elapsed(),
             })
