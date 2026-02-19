@@ -80,12 +80,15 @@ class handler(BaseHTTPRequestHandler):
 
             # 매칭 실행 (dict 리스트 기반, pandas 불필요)
             results = run_matching(settlement_data, termination_data)
-            results_json = results_to_json(results)
             summary_data = summary(results)
             print(f"[PREVIEW] 매칭 완료: {summary_data} ({time.time()-t0:.1f}s)")
 
+            # 매칭된 건만 응답에 포함 (8,329건 → 11건 등으로 응답 크기 대폭 축소)
+            matched_results = [r for r in results if r.settlement_index is not None]
+            results_json = results_to_json(matched_results)
+
             # 내용 변경 감지 (매칭된 건에서 필드 차이 비교)
-            changes = detect_changes(results)
+            changes = detect_changes(matched_results)
             changes_json = changes_to_json(changes)
             changes_sum = changes_summary(changes)
             print(f"[PREVIEW] 변경 감지: {changes_sum} ({time.time()-t0:.1f}s)")
