@@ -365,14 +365,21 @@ def run_matching(
     results = []
     matched_indices: set[int] = set()
 
+    rejected_count = 0  # 교차검증 거부 건수
+
     # === Phase 1: 정확 매칭 (지점 + 이름 + 호실) ===
     unmatched_after_exact = []
     for tp in t_prepared:
         result = _exact_match(tp, exact_index, matched_indices)
         if result is not None:
-            result = _cross_verify(result)
-            matched_indices.add(result.settlement_index)
-            results.append(result)
+            verified = _cross_verify(result)
+            if verified is not None:
+                matched_indices.add(verified.settlement_index)
+                results.append(verified)
+            else:
+                # 검증 거부됨 (만기일/호실 불일치) → 다음 Phase로
+                rejected_count += 1
+                unmatched_after_exact.append(tp)
         else:
             unmatched_after_exact.append(tp)
 
@@ -381,9 +388,13 @@ def run_matching(
     for tp in unmatched_after_exact:
         result = _date_match(tp, date_index, end_date_index, matched_indices)
         if result is not None:
-            result = _cross_verify(result)
-            matched_indices.add(result.settlement_index)
-            results.append(result)
+            verified = _cross_verify(result)
+            if verified is not None:
+                matched_indices.add(verified.settlement_index)
+                results.append(verified)
+            else:
+                rejected_count += 1
+                unmatched_after_date.append(tp)
         else:
             unmatched_after_date.append(tp)
 
@@ -405,8 +416,20 @@ def run_matching(
 
         result = _fuzzy_match_fast(tp, fuzzy_idx, matched_indices, threshold)
         if result is not None:
-            result = _cross_verify(result)
-            matched_indices.add(result.settlement_index)
+            verified = _cross_verify(result)
+            if verified is not None:
+                matched_indices.add(verified.settlement_index)
+                result = verified
+            else:
+                rejected_count += 1
+                result = MatchResult(
+                    termination_index=tp.idx,
+                    settlement_index=None,
+                    status=MatchStatus.UNMATCHED,
+                    confidence=0.0,
+                    match_details="검증 거부 (만기일/호실 불일치 → 다른 계약)",
+                    termination_row=tp.row,
+                )
         else:
             result = MatchResult(
                 termination_index=tp.idx,
@@ -421,9 +444,11 @@ def run_matching(
     results.sort(key=lambda r: r.termination_index)
 
     # 매칭 통계 (디버그)
-    print(f"[MATCHER v5] Phase1(이름): {len(t_prepared) - len(unmatched_after_exact)}, "
+    matched_total = sum(1 for r in results if r.settlement_index is not None)
+    print(f"[MATCHER v5.3] Phase1(이름): {len(t_prepared) - len(unmatched_after_exact)}, "
           f"Phase2(날짜): {len(unmatched_after_exact) - len(unmatched_after_date)}, "
-          f"Phase3(퍼지): {sum(1 for r in results if r.settlement_index is not None) - (len(t_prepared) - len(unmatched_after_date))}, "
+          f"Phase3(퍼지): {matched_total - (len(t_prepared) - len(unmatched_after_date))}, "
+          f"검증거부: {rejected_count}, "
           f"미매칭: {sum(1 for r in results if r.settlement_index is None)}/{len(t_prepared)}")
 
     return results
@@ -684,8 +709,13 @@ def _fuzzy_match_fast(
 # 교차 검증
 # ============================================================
 
-def _cross_verify(result: MatchResult) -> MatchResult:
+def _cross_verify(result: MatchResult) -> Optional[MatchResult]:
+    """
+    교차 검증: 매칭된 쌍의 사업자번호, 시작일, 만기일을 비교.
+    만기일 불일치 → 매칭 거부 (None 반환) — 같은 사람의 다른 계약 방지
+    """
     verified = []
+    hard_reject = False  # 매칭 자체를 거부할지 여부
 
     # 사업자 번호
     t_biz = normalize_business_number(get_col(result.termination_row, COL_TERMINATION_BIZ_NUM))
@@ -697,13 +727,38 @@ def _cross_verify(result: MatchResult) -> MatchResult:
     t_date = parse_date(get_col(result.termination_row, COL_TERMINATION_START_DATE))
     s_date = parse_date(get_col(result.settlement_row, COL_SETTLEMENT_START_DATE))
     if t_date and s_date:
-        verified.append("시작일일치" if t_date == s_date else "시작일불일치")
+        if t_date == s_date:
+            verified.append("시작일일치")
+        else:
+            verified.append("시작일불일치")
 
-    # 계약 만기일
+    # 계약 만기일 — 핵심 검증 (다르면 다른 계약임)
     t_end = parse_date(get_col(result.termination_row, COL_TERMINATION_END_DATE))
     s_end = parse_date(get_col(result.settlement_row, COL_SETTLEMENT_END_DATE))
     if t_end and s_end:
-        verified.append("만기일일치" if t_end == s_end else "만기일불일치")
+        if t_end == s_end:
+            verified.append("만기일일치")
+        else:
+            verified.append("만기일불일치")
+            hard_reject = True  # ★ 만기일이 다르면 다른 계약 → 거부
+
+    # 호실 검증
+    t_room = normalize_text(get_col(result.termination_row, COL_TERMINATION_ROOM))
+    s_room = normalize_text(get_col(result.settlement_row, COL_SETTLEMENT_ROOM))
+    if t_room and s_room:
+        if t_room == s_room:
+            verified.append("호실일치")
+        else:
+            verified.append("호실불일치")
+            # 호실이 다르고 만기일도 확인 안 되면 거부
+            if not any("만기일일치" in v for v in verified):
+                hard_reject = True  # ★ 호실 다르고 만기일 확인 불가 → 거부
+
+    # 만기일이 다르면 매칭 자체를 거부 (같은 사람의 다른 계약)
+    if hard_reject:
+        result.verification_passed = False
+        result.match_details += f" [검증거부: {','.join(verified)}]"
+        return None  # ★ 매칭 거부
 
     has_ok = any("일치" in v and "불일치" not in v for v in verified)
     has_ng = any("불일치" in v for v in verified)
@@ -831,25 +886,31 @@ def changes_summary(changes: list[ChangeResult]) -> dict:
 # ============================================================
 
 def results_to_json(results: list[MatchResult]) -> list[dict]:
-    return [{
-        "termination_index": r.termination_index,
-        "settlement_index": r.settlement_index,
-        "status": r.status.value,
-        "confidence": round(r.confidence, 1),
-        "match_details": r.match_details,
-        "verification_passed": r.verification_passed,
-        "t_branch": get_col(r.termination_row, COL_TERMINATION_BRANCH),
-        "t_contractor": extract_name(r.termination_row, COL_TERMINATION_NAME, NAME_FALLBACK_COLUMNS_TERMINATION),
-        "t_room": get_col(r.termination_row, COL_TERMINATION_ROOM),
-        "t_expiry": get_col(r.termination_row, COL_TERMINATION_END_DATE),
-        "t_start": get_col(r.termination_row, COL_TERMINATION_START_DATE),
-        "t_biz_num": get_col(r.termination_row, COL_TERMINATION_BIZ_NUM),
-        "s_branch": get_col(r.settlement_row, COL_SETTLEMENT_BRANCH) if r.settlement_row else "",
-        "s_contractor": get_col(r.settlement_row, COL_SETTLEMENT_NAME) if r.settlement_row else "",
-        "s_room": get_col(r.settlement_row, COL_SETTLEMENT_ROOM) if r.settlement_row else "",
-        "s_biz_num": get_col(r.settlement_row, COL_SETTLEMENT_BIZ_NUM) if r.settlement_row else "",
-        "s_note": get_col(r.settlement_row, COL_SETTLEMENT_NOTE) if r.settlement_row else "",
-    } for r in results]
+    out = []
+    for r in results:
+        # 종료시트 날짜는 밀림 보정된 값 사용
+        t_start_corr, t_end_corr = _get_termination_dates(r.termination_row)
+        out.append({
+            "termination_index": r.termination_index,
+            "settlement_index": r.settlement_index,
+            "status": r.status.value,
+            "confidence": round(r.confidence, 1),
+            "match_details": r.match_details,
+            "verification_passed": r.verification_passed,
+            "t_branch": get_col(r.termination_row, COL_TERMINATION_BRANCH),
+            "t_contractor": extract_name(r.termination_row, COL_TERMINATION_NAME, NAME_FALLBACK_COLUMNS_TERMINATION),
+            "t_room": get_col(r.termination_row, COL_TERMINATION_ROOM),
+            "t_expiry": t_end_corr or get_col(r.termination_row, COL_TERMINATION_END_DATE),
+            "t_start": t_start_corr or get_col(r.termination_row, COL_TERMINATION_START_DATE),
+            "t_biz_num": get_col(r.termination_row, COL_TERMINATION_BIZ_NUM),
+            "s_branch": get_col(r.settlement_row, COL_SETTLEMENT_BRANCH) if r.settlement_row else "",
+            "s_contractor": get_col(r.settlement_row, COL_SETTLEMENT_NAME) if r.settlement_row else "",
+            "s_room": get_col(r.settlement_row, COL_SETTLEMENT_ROOM) if r.settlement_row else "",
+            "s_biz_num": get_col(r.settlement_row, COL_SETTLEMENT_BIZ_NUM) if r.settlement_row else "",
+            "s_note": get_col(r.settlement_row, COL_SETTLEMENT_NOTE) if r.settlement_row else "",
+            "s_end_date": get_col(r.settlement_row, COL_SETTLEMENT_END_DATE) if r.settlement_row else "",
+        })
+    return out
 
 
 def summary(results: list[MatchResult]) -> dict:

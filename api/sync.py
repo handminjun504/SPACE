@@ -25,6 +25,7 @@ from _lib.matcher import (
     get_col,
     run_matching,
     detect_changes,
+    _get_termination_dates,
 )
 
 
@@ -101,7 +102,9 @@ class handler(BaseHTTPRequestHandler):
                     skipped += 1
                     continue
 
-                expiry = get_col(r.termination_row, "계약 만기 날짜")
+                # 날짜 밀림 보정 적용: 원본 컬럼 대신 보정된 날짜 사용
+                _, corrected_expiry = _get_termination_dates(r.termination_row)
+                expiry = corrected_expiry if corrected_expiry else get_col(r.termination_row, "계약 만기 날짜")
                 new_note = TERMINATION_NOTE_TEMPLATE.format(
                     expiry_date=expiry if expiry else "미확인"
                 )
