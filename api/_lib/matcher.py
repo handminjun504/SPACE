@@ -459,7 +459,10 @@ def run_matching(
 # ============================================================
 
 def _exact_match(tp: PreparedRow, exact_index, matched) -> Optional[MatchResult]:
-    if not tp.branch_norm and not tp.name_norm:
+    # 이름이 없으면 정확 매칭 불가 (빈 이름끼리 매칭 방지)
+    if not tp.name_norm:
+        return None
+    if not tp.branch_norm:
         return None
 
     original = get_col(tp.row, COL_TERMINATION_NAME)
@@ -742,7 +745,7 @@ def _cross_verify(result: MatchResult) -> Optional[MatchResult]:
             verified.append("만기일불일치")
             hard_reject = True  # ★ 만기일이 다르면 다른 계약 → 거부
 
-    # 호실 검증
+    # 호실 검증 — 호실이 다르면 무조건 다른 계약 → 거부
     t_room = normalize_text(get_col(result.termination_row, COL_TERMINATION_ROOM))
     s_room = normalize_text(get_col(result.settlement_row, COL_SETTLEMENT_ROOM))
     if t_room and s_room:
@@ -750,9 +753,7 @@ def _cross_verify(result: MatchResult) -> Optional[MatchResult]:
             verified.append("호실일치")
         else:
             verified.append("호실불일치")
-            # 호실이 다르고 만기일도 확인 안 되면 거부
-            if not any("만기일일치" in v for v in verified):
-                hard_reject = True  # ★ 호실 다르고 만기일 확인 불가 → 거부
+            hard_reject = True  # ★ 호실 다르면 무조건 거부 (같은 사람의 다른 호실 계약)
 
     # 만기일이 다르면 매칭 자체를 거부 (같은 사람의 다른 계약)
     if hard_reject:
