@@ -26,7 +26,10 @@ def log_entry(hypothesis_id, location, message, data=None):
     }
     with open(LOG_PATH, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    print(f"  [{hypothesis_id}] {message}: {json.dumps(data, ensure_ascii=False) if data else ''}")
+    try:
+        print(f"  [{hypothesis_id}] {message}: {json.dumps(data, ensure_ascii=True) if data else ''}")
+    except Exception:
+        print(f"  [{hypothesis_id}] {message}: (print encoding error)")
 
 
 def call_api(endpoint, timeout=65):
