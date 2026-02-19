@@ -161,26 +161,26 @@
 
         <!-- 탭 1: 계약 종료 테이블 -->
         <div id="tabTermination" class="tab-content active">
-          <div class="overflow-x-auto">
-            <table>
-              <thead>
-                <tr>
-                  <th class="check-col"><input type="checkbox" id="selectAll" onchange="toggleAll()"></th>
-                  <th>상태</th>
-                  <th>종료 시트 (지점/계약자/호실)</th>
-                  <th>정산 시트 (지점/계약자/호실)</th>
-                  <th>만기일</th>
-                  <th>신뢰도</th>
-                </tr>
-              </thead>
-              <tbody id="resultsBody"></tbody>
-            </table>
-          </div>
+        <div class="overflow-x-auto">
+          <table>
+            <thead>
+              <tr>
+                <th class="check-col"><input type="checkbox" id="selectAll" onchange="toggleAll()"></th>
+                <th>상태</th>
+                <th>종료 시트 (지점/계약자/호실)</th>
+                <th>정산 시트 (지점/계약자/호실)</th>
+                <th>만기일</th>
+                <th>신뢰도</th>
+              </tr>
+            </thead>
+            <tbody id="resultsBody"></tbody>
+          </table>
+        </div>
           <div class="flex gap-3 justify-end mt-4">
-            <button class="btn btn-outline" onclick="selectExactOnly()">정확매칭만 선택</button>
-            <button class="btn btn-danger" onclick="doSync()" id="syncBtn">
-              선택 건 동기화 실행 (배경색 + 취소선)
-            </button>
+        <button class="btn btn-outline" onclick="selectExactOnly()">정확매칭만 선택</button>
+        <button class="btn btn-danger" onclick="doSync()" id="syncBtn">
+          선택 건 동기화 실행 (배경색 + 취소선)
+        </button>
           </div>
         </div>
 
@@ -248,10 +248,10 @@
       let res;
       try {
         res = await fetch('/api/' + endpoint, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Password': password },
-          body: JSON.stringify(body),
-        });
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Password': password },
+        body: JSON.stringify(body),
+      });
       } catch (fetchErr) {
         // #region agent log
         _dbg('api:fetch_error', 'network_error', {endpoint, error: fetchErr.message, elapsed_ms: Date.now()-t0});

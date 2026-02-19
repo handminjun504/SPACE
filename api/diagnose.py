@@ -56,7 +56,7 @@ class handler(BaseHTTPRequestHandler):
             try:
                 s_title, _, s_data = open_and_read(client, sid, sws)
                 s_headers = list(s_data[0].keys()) if s_data else []
-                steps.append({"step": "3_settlement", "ok": True, "title": s_title, "rows": len(s_data), "headers": s_headers, "sample": {k: v for k, v in list(s_data[0].items())[:20]} if s_data else {}, "elapsed_s": elapsed()})
+                steps.append({"step": "3_settlement", "ok": True, "title": s_title, "rows": len(s_data), "headers": s_headers, "elapsed_s": elapsed()})
             except Exception as e:
                 import traceback
                 steps.append({"step": "3_settlement", "ok": False, "error": str(e), "tb": traceback.format_exc()[-300:], "elapsed_s": elapsed()})
@@ -68,8 +68,11 @@ class handler(BaseHTTPRequestHandler):
                 term_id = extract_sheet_id(term_url)
                 t_title, t_ws_list, t_data = open_and_read(client, term_id, term_ws)
                 t_headers = list(t_data[0].keys()) if t_data else []
-                t_sample = {k: v for k, v in list(t_data[0].items())} if t_data else {}
-                steps.append({"step": "4_termination", "ok": True, "title": t_title, "ws_list": t_ws_list, "rows": len(t_data), "headers": t_headers, "sample": t_sample, "elapsed_s": elapsed()})
+                t_sample = {}
+                if t_data:
+                    for k, v in list(t_data[0].items()):
+                        t_sample[k] = str(v)[:60] if v else ""
+                steps.append({"step": "4_termination", "ok": True, "title": t_title, "ws_list": t_ws_list, "rows": len(t_data), "headers": t_headers, "sample_row": t_sample, "elapsed_s": elapsed()})
             except Exception as e:
                 import traceback
                 steps.append({"step": "4_termination", "ok": False, "error": str(e), "tb": traceback.format_exc()[-300:], "elapsed_s": elapsed()})
@@ -90,7 +93,7 @@ class handler(BaseHTTPRequestHandler):
         if mode == "full" and term_url:
             # 데이터 품질 분석
             from _lib.matcher import (
-                normalize_text, normalize_name, normalize_date_str, normalize_room, get_col,
+                normalize_text, normalize_name, normalize_date_str, get_col,
                 _get_termination_dates, _prepare_termination,
                 extract_name,
             )
