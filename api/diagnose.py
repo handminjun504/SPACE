@@ -90,7 +90,7 @@ class handler(BaseHTTPRequestHandler):
         if mode == "full" and term_url:
             # 데이터 품질 분석
             from _lib.matcher import (
-                normalize_text, normalize_name, normalize_date_str, get_col,
+                normalize_text, normalize_name, normalize_date_str, normalize_room, get_col,
                 _get_termination_dates, _prepare_termination,
                 extract_name,
             )
