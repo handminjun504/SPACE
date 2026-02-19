@@ -1,6 +1,6 @@
 """
-504 타임아웃 전체 플로우 진단 스크립트
-전체 preview 흐름 (정산 + 종료 + 매칭 + 변경감지)을 단계별 측정합니다.
+504 타임아웃 단계별 격리 진단
+3번의 독립 API 호출로 어떤 단계가 느린지 측정합니다.
 """
 
 import json
@@ -21,97 +21,93 @@ def log_entry(hyp, loc, msg, data=None):
     entry = {
         "hypothesisId": hyp, "location": loc, "message": msg,
         "data": data or {}, "timestamp": int(time.time() * 1000),
-        "runId": "full-flow-diag",
+        "runId": "isolated-diag",
     }
     with open(LOG_PATH, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    try:
-        print(f"  [{hyp}] {msg}: {json.dumps(data, ensure_ascii=True) if data else ''}")
-    except Exception:
-        print(f"  [{hyp}] {msg}: (encoding error)")
 
 
-def main():
-    print("=" * 60)
-    print("Vercel 504 \uc804\uccb4 \ud50c\ub85c\uc6b0 \uc9c4\ub2e8")
-    print("=" * 60)
+def call_diagnose(mode, params_extra=None):
+    params = {"mode": mode}
+    if params_extra:
+        params.update(params_extra)
+    qs = urllib.parse.urlencode(params)
+    endpoint = f"{VERCEL_URL}/api/diagnose?{qs}"
 
-    # 전체 플로우 진단 (종료 시트 포함)
-    params = urllib.parse.urlencode({"url": TERM_URL, "ws": TERM_WS})
-    endpoint = f"{VERCEL_URL}/api/diagnose?{params}"
-    print(f"\n>>> \ud638\ucd9c: {endpoint[:100]}...")
-    print(f">>> \ud0c0\uc784\uc544\uc6c3: 120\ucd08")
+    label = {
+        "settlement": "[F] \uc815\uc0b0 \uc2dc\ud2b8\ub9cc",
+        "termination": "[F] \uc885\ub8cc \uc2dc\ud2b8\ub9cc",
+        "full": "[G] \uc804\uccb4 \ud50c\ub85c\uc6b0",
+    }.get(mode, mode)
+
+    print(f"\n--- {label} ---")
+    print(f"  URL: {endpoint[:80]}...")
 
     t0 = time.time()
     try:
         req = urllib.request.Request(endpoint)
-        resp = urllib.request.urlopen(req, timeout=120)
+        resp = urllib.request.urlopen(req, timeout=65)
         elapsed = time.time() - t0
         data = json.loads(resp.read())
-        print(f"<<< \uc751\ub2f5: HTTP {resp.status} ({elapsed:.2f}s)")
 
-        log_entry("FULL", "diagnose:response", "full_flow_result", {
+        print(f"  HTTP {resp.status} ({elapsed:.2f}s)")
+        for step in data.get("steps", []):
+            name = step.get("step", "?")
+            ok = step.get("ok", "?")
+            se = step.get("elapsed_s", 0)
+            extra_parts = []
+            if "rows" in step:
+                extra_parts.append(f"rows={step['rows']}")
+            if "matched" in step:
+                extra_parts.append(f"matched={step['matched']}")
+            if "changes" in step:
+                extra_parts.append(f"changes={step['changes']}")
+            if "resp_bytes" in step:
+                extra_parts.append(f"size={step['resp_bytes']}B")
+            if "error" in step:
+                extra_parts.append(f"ERR={step['error'][:60]}")
+            extra = " " + " ".join(extra_parts) if extra_parts else ""
+            print(f"    {name}: ok={ok} {se}s{extra}")
+
+        log_entry(mode[0].upper(), f"diagnose:{mode}", f"{mode}_result", {
             "status": resp.status, "data": data, "elapsed": round(elapsed, 2),
         })
-
-        # 각 단계별 타이밍 출력
-        if "steps" in data:
-            print(f"\n--- \ub2e8\uacc4\ubcc4 \ud0c0\uc774\ubc0d ---")
-            prev_time = 0
-            for step in data["steps"]:
-                step_name = step.get("step", "?")
-                step_elapsed = step.get("elapsed_s", 0)
-                step_delta = round(step_elapsed - prev_time, 3) if step_elapsed else 0
-                ok = step.get("ok", "?")
-                extra = ""
-                if "rows" in step:
-                    extra += f" rows={step['rows']}"
-                if "matched" in step:
-                    extra += f" matched={step['matched']}"
-                if "changes_count" in step:
-                    extra += f" changes={step['changes_count']}"
-                if "response_size_bytes" in step:
-                    extra += f" size={step['response_size_bytes']}B"
-                if "error" in step:
-                    extra += f" ERROR={step['error'][:80]}"
-                if step.get("skipped"):
-                    extra = " SKIPPED"
-
-                hyp_map = {
-                    "1_imports": "H",
-                    "2_gspread_client": "H",
-                    "3_settlement_read": "F",
-                    "4_termination_read": "F",
-                    "5_matching": "G",
-                    "6_detect_changes": "G",
-                    "7_json_serialize": "I",
-                }
-                hyp = hyp_map.get(step_name, "?")
-                print(f"  [{hyp}] {step_name}: \u0394{step_delta:.3f}s (total {step_elapsed}s) ok={ok}{extra}")
-                log_entry(hyp, f"diagnose:{step_name}", f"step_{step_name}", step)
-                prev_time = step_elapsed
-
-        if "warning" in data:
-            print(f"\n\u26a0\ufe0f WARNING: {data['warning']}")
-        print(f"\n\uc804\uccb4 \uc18c\uc694\uc2dc\uac04: {data.get('total_elapsed_s', '?')}s")
+        return data
 
     except urllib.error.HTTPError as e:
         elapsed = time.time() - t0
-        body = e.read().decode("utf-8", errors="replace")
-        print(f"<<< HTTP ERROR {e.code} ({elapsed:.2f}s)")
-        print(f"    Body: {body[:200]}")
-        log_entry("?", "diagnose:error", "http_error", {
-            "code": e.code, "body": body[:500], "elapsed": round(elapsed, 2),
+        body = e.read().decode("utf-8", errors="replace")[:200]
+        print(f"  HTTP ERROR {e.code} ({elapsed:.2f}s): {body[:80]}")
+        log_entry("!", f"diagnose:{mode}", f"{mode}_error", {
+            "code": e.code, "body": body, "elapsed": round(elapsed, 2),
         })
+        return None
+
     except Exception as e:
         elapsed = time.time() - t0
-        print(f"<<< ERROR: {type(e).__name__}: {e} ({elapsed:.2f}s)")
-        log_entry("?", "diagnose:error", "exception", {
-            "type": type(e).__name__, "message": str(e), "elapsed": round(elapsed, 2),
+        print(f"  EXCEPTION: {type(e).__name__}: {e} ({elapsed:.2f}s)")
+        log_entry("!", f"diagnose:{mode}", f"{mode}_exception", {
+            "type": type(e).__name__, "msg": str(e), "elapsed": round(elapsed, 2),
         })
+        return None
+
+
+def main():
+    print("=" * 60)
+    print("Vercel 504 \ub2e8\uacc4\ubcc4 \uaca9\ub9ac \uc9c4\ub2e8")
+    print("=" * 60)
+
+    # Step A: 정산 시트만 (이전에 5초 성공)
+    call_diagnose("settlement")
+
+    # Step B: 종료 시트만 (미검증 영역!)
+    call_diagnose("termination", {"url": TERM_URL, "ws": TERM_WS})
+
+    # Step C: 전체 플로우 (정산+종료+매칭+변경감지)
+    call_diagnose("full", {"url": TERM_URL, "ws": TERM_WS})
 
     print(f"\n{'=' * 60}")
-    print(f"\ub85c\uadf8 \ud30c\uc77c: {LOG_PATH}")
+    print(f"\ub85c\uadf8: {LOG_PATH}")
     print(f"{'=' * 60}")
 
 
