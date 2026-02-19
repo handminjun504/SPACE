@@ -93,7 +93,10 @@ class handler(BaseHTTPRequestHandler):
             })
 
         except Exception as e:
-            self._json(500, {"ok": False, "error": f"서버 오류: {str(e)}"})
+            import traceback
+            tb = traceback.format_exc()
+            print(f"[PREVIEW ERROR] {tb}")  # Vercel 로그에 출력
+            self._json(500, {"ok": False, "error": f"서버 오류: {type(e).__name__}: {str(e)}"})
 
     def _json(self, status: int, data: dict):
         self.send_response(status)
