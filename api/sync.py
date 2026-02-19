@@ -1,12 +1,6 @@
 """
 POST /api/sync - 동기화 실행 (배경색 + 취소선 적용)
-
-Request:  { "termination_url": "...", "worksheet_name": "Sheet1", "selected_indices": [0,1,3,...] }
-Header:   X-Password: ...
-Response: { "ok": true, "updated": 3, "skipped": 1 }
-
-selected_indices: 미리보기 결과에서 사용자가 선택한 항목의 인덱스 (results 배열 기준)
-                  비어있으면 정확매칭 + 검증통과 건만 자동 적용
+최적화: open_and_read로 API 호출 최소화, pandas 제거
 """
 
 import json
@@ -14,10 +8,7 @@ import os
 import sys
 from http.server import BaseHTTPRequestHandler
 
-# Vercel 런타임에서 _lib 모듈을 찾을 수 있도록 경로 추가
 sys.path.insert(0, os.path.dirname(__file__))
-
-import pandas as pd
 
 from _lib.sheets import (
     extract_sheet_id,
@@ -25,7 +16,7 @@ from _lib.sheets import (
     get_gspread_client,
     get_worksheet,
     highlight_rows,
-    read_sheet_as_dataframe,
+    open_and_read,
 )
 from _lib.matcher import (
     ALREADY_TERMINATED_KEYWORDS,
@@ -39,7 +30,6 @@ from _lib.matcher import (
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
-            # 비밀번호 확인
             pw = self.headers.get("X-Password", "")
             if pw != os.environ.get("APP_PASSWORD", ""):
                 self._json(401, {"ok": False, "error": "인증 실패"})
@@ -65,19 +55,17 @@ class handler(BaseHTTPRequestHandler):
             termination_id = extract_sheet_id(termination_url)
             client = get_gspread_client()
 
-            # 데이터 읽기
-            settlement_df = read_sheet_as_dataframe(client, settlement_id, settlement_ws)
-            termination_df = read_sheet_as_dataframe(client, termination_id, ws_name)
+            # 데이터 읽기 (최적화: 한 번에)
+            _, _, settlement_data = open_and_read(client, settlement_id, settlement_ws)
+            _, _, termination_data = open_and_read(client, termination_id, ws_name)
 
             # 매칭 실행
-            results = run_matching(settlement_df, termination_df)
+            results = run_matching(settlement_data, termination_data)
 
             # 적용 대상 필터링
             if selected_indices is not None:
-                # 사용자가 선택한 항목만
                 targets = [results[i] for i in selected_indices if i < len(results)]
             else:
-                # 기본: 정확매칭 또는 검증통과 유사매칭만
                 targets = [
                     r for r in results
                     if r.settlement_index is not None
@@ -85,19 +73,15 @@ class handler(BaseHTTPRequestHandler):
                          or (r.status == MatchStatus.FUZZY and r.verification_passed))
                 ]
 
-            # 정산 시트 워크시트 열기
+            # 정산 시트 워크시트 열기 (쓰기용)
             worksheet = get_worksheet(client, settlement_id, settlement_ws)
-
-            # 비고 컬럼 인덱스 찾기
             note_col_idx = find_column_index(worksheet, "계약변경/해지/비고")
 
-            # 계약종료일자 컬럼 인덱스
             try:
                 end_date_col_idx = find_column_index(worksheet, "계약종료일자")
             except ValueError:
                 end_date_col_idx = None
 
-            # 업데이트 대상 준비
             row_numbers = []
             notes = []
             end_dates = []
@@ -111,13 +95,11 @@ class handler(BaseHTTPRequestHandler):
 
                 sheet_row = r.settlement_index + 2  # 0-based → 1-based + 헤더
 
-                # 이미 종료 처리된 건 건너뛰기
                 existing_note = get_col(r.settlement_row, "계약변경/해지/비고")
                 if any(kw in existing_note for kw in ALREADY_TERMINATED_KEYWORDS):
                     skipped += 1
                     continue
 
-                # 만기일 가져오기
                 expiry = get_col(r.termination_row, "계약 만기 날짜")
                 new_note = TERMINATION_NOTE_TEMPLATE.format(
                     expiry_date=expiry if expiry else "미확인"
@@ -130,7 +112,6 @@ class handler(BaseHTTPRequestHandler):
                 end_dates.append(expiry)
                 updated += 1
 
-            # 강조 + 비고 적용
             if row_numbers:
                 highlight_rows(
                     worksheet=worksheet,
@@ -150,8 +131,7 @@ class handler(BaseHTTPRequestHandler):
 
         except Exception as e:
             import traceback
-            tb = traceback.format_exc()
-            print(f"[SYNC ERROR] {tb}")  # Vercel 로그에 출력
+            print(f"[SYNC ERROR] {traceback.format_exc()}")
             self._json(500, {"ok": False, "error": f"서버 오류: {type(e).__name__}: {str(e)}"})
 
     def _json(self, status: int, data: dict):
@@ -169,4 +149,3 @@ class handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Password")
         self.end_headers()
-

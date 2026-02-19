@@ -2,6 +2,7 @@
 Google Sheets 읽기/쓰기/포맷팅 모듈 (Vercel 서버리스용)
 
 서비스 계정 JSON은 환경변수 GOOGLE_CREDENTIALS_JSON에서 로드합니다.
+최적화: 스프레드시트를 한 번만 열어 API 호출을 최소화합니다.
 """
 
 import json
@@ -10,7 +11,6 @@ import re
 from typing import Optional
 
 import gspread
-import pandas as pd
 from google.oauth2.service_account import Credentials
 
 SCOPES = [
@@ -33,21 +33,11 @@ def get_gspread_client() -> gspread.Client:
 
 
 def extract_sheet_id(url_or_id: str) -> str:
-    """
-    구글 시트 URL 또는 ID에서 시트 ID를 추출합니다.
-
-    Args:
-        url_or_id: 구글 시트 URL 또는 시트 ID
-
-    Returns:
-        시트 ID 문자열
-    """
+    """구글 시트 URL 또는 ID에서 시트 ID를 추출합니다."""
     url_or_id = url_or_id.strip()
-    # URL 패턴: https://docs.google.com/spreadsheets/d/SHEET_ID/...
     match = re.search(r"/spreadsheets/d/([a-zA-Z0-9_-]+)", url_or_id)
     if match:
         return match.group(1)
-    # 이미 ID 형태인 경우
     if re.match(r"^[a-zA-Z0-9_-]+$", url_or_id):
         return url_or_id
     raise ValueError(f"유효한 구글 시트 URL/ID가 아닙니다: {url_or_id}")
@@ -70,42 +60,37 @@ def _make_unique_headers(headers: list[str]) -> list[str]:
     return result
 
 
-def read_sheet_as_dataframe(
+def open_and_read(
     client: gspread.Client,
     sheet_id: str,
     worksheet_name: str = "Sheet1",
-) -> pd.DataFrame:
+) -> tuple[str, list[str], list[dict]]:
     """
-    구글 시트를 DataFrame으로 읽어옵니다.
-    헤더 중복이 있어도 안전하게 처리합니다.
+    스프레드시트를 한 번만 열어서 제목, 탭 목록, 데이터를 모두 반환합니다.
+    API 호출을 최소화합니다.
+
+    Returns:
+        (시트 제목, 워크시트 목록, 데이터 딕셔너리 리스트)
     """
-    try:
-        spreadsheet = client.open_by_key(sheet_id)
-    except Exception as e:
-        raise PermissionError(
-            f"시트(ID: {sheet_id[:12]}...) 열기 실패. "
-            f"서비스 계정에 시트 공유가 필요합니다. "
-            f"원본 에러: {type(e).__name__}: {str(e)}"
-        ) from e
+    spreadsheet = client.open_by_key(sheet_id)
+    title = spreadsheet.title
+    ws_titles = [ws.title for ws in spreadsheet.worksheets()]
 
-    try:
-        worksheet = spreadsheet.worksheet(worksheet_name)
-    except gspread.exceptions.WorksheetNotFound:
-        available = [ws.title for ws in spreadsheet.worksheets()]
-        raise ValueError(
-            f"'{worksheet_name}' 탭을 찾을 수 없습니다. "
-            f"사용 가능한 탭: {', '.join(available)}"
-        )
-
-    # get_all_values()는 헤더 중복 문제 없이 모든 셀 값을 가져옴
+    worksheet = spreadsheet.worksheet(worksheet_name)
     all_values = worksheet.get_all_values()
+
     if not all_values or len(all_values) < 2:
-        return pd.DataFrame()
+        return title, ws_titles, []
 
     headers = _make_unique_headers(all_values[0])
-    data = all_values[1:]
+    data = []
+    for row_values in all_values[1:]:
+        row_dict = {}
+        for i, header in enumerate(headers):
+            row_dict[header] = row_values[i] if i < len(row_values) else ""
+        data.append(row_dict)
 
-    return pd.DataFrame(data, columns=headers)
+    return title, ws_titles, data
 
 
 def get_worksheet(
@@ -119,10 +104,7 @@ def get_worksheet(
 
 
 def find_column_index(worksheet: gspread.Worksheet, column_name: str) -> int:
-    """
-    헤더 행에서 컬럼 인덱스(1-based)를 찾습니다.
-    공백/줄바꿈 차이를 무시하고 매칭합니다.
-    """
+    """헤더 행에서 컬럼 인덱스(1-based)를 찾습니다."""
     headers = worksheet.row_values(1)
     normalized_target = column_name.replace(" ", "").replace("\n", "").strip()
     for i, header in enumerate(headers, 1):
@@ -139,31 +121,15 @@ def highlight_rows(
     end_date_col_idx: Optional[int] = None,
     end_dates: Optional[list[str]] = None,
 ):
-    """
-    정산 시트에서 종료 건 행에 배경색 + 취소선을 적용하고 비고를 기록합니다.
-
-    Args:
-        worksheet: 워크시트 객체
-        row_numbers: 강조할 행 번호 리스트 (1-based)
-        note_col_idx: 비고 컬럼 인덱스 (1-based)
-        notes: 각 행에 기록할 비고 텍스트 리스트
-        end_date_col_idx: 계약종료일자 컬럼 인덱스 (1-based, 선택)
-        end_dates: 각 행의 만기일 리스트 (선택)
-    """
+    """정산 시트에서 종료 건 행에 배경색 + 취소선을 적용하고 비고를 기록합니다."""
     if not row_numbers:
         return
 
-    # 시트의 전체 컬럼 수 확인
     total_cols = len(worksheet.row_values(1))
-
-    # 배치 업데이트용 요청 목록
-    spreadsheet_id = worksheet.spreadsheet.id
     sheet_id = worksheet.id
-
     requests = []
 
     for i, row_num in enumerate(row_numbers):
-        # 1) 배경색 + 취소선 포맷 적용 (전체 행)
         requests.append({
             "repeatCell": {
                 "range": {
@@ -183,18 +149,15 @@ def highlight_rows(
             }
         })
 
-    # 포맷 일괄 적용
     if requests:
         worksheet.spreadsheet.batch_update({"requests": requests})
 
-    # 2) 비고 컬럼에 텍스트 기록 (batch update)
     cells_to_update = []
     for i, row_num in enumerate(row_numbers):
         if i < len(notes):
             cells_to_update.append(
                 gspread.Cell(row=row_num, col=note_col_idx, value=notes[i])
             )
-        # 계약종료일자도 업데이트
         if end_date_col_idx and end_dates and i < len(end_dates) and end_dates[i]:
             cells_to_update.append(
                 gspread.Cell(row=row_num, col=end_date_col_idx, value=end_dates[i])
@@ -202,19 +165,3 @@ def highlight_rows(
 
     if cells_to_update:
         worksheet.update_cells(cells_to_update)
-
-
-def get_sheet_title(client: gspread.Client, sheet_id: str) -> str:
-    """시트 제목을 가져옵니다. 에러 시 그대로 raise."""
-    spreadsheet = client.open_by_key(sheet_id)
-    return spreadsheet.title
-
-
-def list_worksheets(client: gspread.Client, sheet_id: str) -> list[str]:
-    """시트의 워크시트(탭) 목록을 가져옵니다."""
-    try:
-        spreadsheet = client.open_by_key(sheet_id)
-        return [ws.title for ws in spreadsheet.worksheets()]
-    except Exception:
-        return []
-

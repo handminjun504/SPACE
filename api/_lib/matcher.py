@@ -1,7 +1,7 @@
 """
-매칭 엔진 모듈 (Vercel 서버리스용) — 속도 최적화 버전
+매칭 엔진 모듈 (Vercel 서버리스용) — 초경량 버전
 
-정산 시트와 계약 종료 시트 간 데이터를 매칭합니다.
+pandas 제거, 순수 dict 리스트 기반으로 동작합니다.
 1차 정확 매칭 (인덱스 기반 O(1)) → 퍼지 매칭 → 교차 검증
 """
 
@@ -12,7 +12,6 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional
 
-import pandas as pd
 from rapidfuzz import fuzz
 
 # ============================================================
@@ -24,12 +23,9 @@ DATE_FORMATS = [
     "%Y-%m-%d", "%Y.%m.%d", "%Y/%m/%d", "%Y%m%d",
     "%y-%m-%d", "%y.%m.%d", "%y/%m/%d",
 ]
-# 종료 시트에서 계약자명이 비어있을 때 이름 폴백 컬럼
 NAME_FALLBACK_COLUMNS_TERMINATION = ["주민 번호", "상호"]
 NAME_FALLBACK_COLUMNS_SETTLEMENT = []
-# 이미 종료 처리된 키워드
 ALREADY_TERMINATED_KEYWORDS = ["계약종료", "해지", "종료"]
-# 비고 메시지 템플릿
 TERMINATION_NOTE_TEMPLATE = "계약종료 (만기일: {expiry_date})"
 
 
@@ -55,8 +51,8 @@ class MatchResult:
 # 유틸리티 함수
 # ============================================================
 
-def normalize_text(text: str) -> str:
-    if pd.isna(text) or text is None:
+def normalize_text(text) -> str:
+    if text is None:
         return ""
     text = str(text).strip()
     for char in NORMALIZE_REMOVE_CHARS:
@@ -64,9 +60,8 @@ def normalize_text(text: str) -> str:
     return text.lower()
 
 
-def normalize_name(name: str) -> str:
-    """한글명/영문명 정규화"""
-    if pd.isna(name) or name is None:
+def normalize_name(name) -> str:
+    if name is None:
         return ""
     name = str(name).strip()
     if not name:
@@ -80,9 +75,8 @@ def normalize_name(name: str) -> str:
     return name.replace(" ", "").lower()
 
 
-def is_likely_name(text: str) -> bool:
-    """주민번호 칸에 이름이 들어있는지 판별"""
-    if pd.isna(text) or text is None:
+def is_likely_name(text) -> bool:
+    if text is None:
         return False
     text = str(text).strip()
     if not text:
@@ -97,14 +91,14 @@ def is_likely_name(text: str) -> bool:
     return False
 
 
-def normalize_business_number(biz_num: str) -> str:
-    if pd.isna(biz_num) or biz_num is None:
+def normalize_business_number(biz_num) -> str:
+    if biz_num is None:
         return ""
     return re.sub(r"[^0-9]", "", str(biz_num))
 
 
-def parse_date(date_str: str) -> Optional[datetime]:
-    if pd.isna(date_str) or date_str is None or str(date_str).strip() == "":
+def parse_date(date_str) -> Optional[datetime]:
+    if date_str is None or str(date_str).strip() == "":
         return None
     date_str = str(date_str).strip()
     for fmt in DATE_FORMATS:
@@ -118,18 +112,15 @@ def parse_date(date_str: str) -> Optional[datetime]:
 def get_col(row: dict, col_name: str) -> str:
     """행에서 컬럼값을 유연하게 가져옴 (공백/줄바꿈 차이 무시)"""
     if col_name in row:
-        v = row[col_name]
-        return str(v) if not pd.isna(v) else ""
+        return str(row[col_name]) if row[col_name] is not None else ""
     norm = col_name.replace(" ", "").replace("\n", "").strip()
     for key in row.keys():
         if str(key).replace(" ", "").replace("\n", "").strip() == norm:
-            v = row[key]
-            return str(v) if not pd.isna(v) else ""
+            return str(row[key]) if row[key] is not None else ""
     return ""
 
 
-def extract_name(row: dict, name_col: str, fallback_cols: list[str]) -> str:
-    """계약자명 추출 (폴백: 주민번호칸 이름)"""
+def extract_name(row: dict, name_col: str, fallback_cols: list) -> str:
     name = get_col(row, name_col)
     if name.strip():
         return name.strip()
@@ -141,56 +132,33 @@ def extract_name(row: dict, name_col: str, fallback_cols: list[str]) -> str:
 
 
 # ============================================================
-# 인덱스 빌더 (속도 최적화)
+# 매칭 엔진 (dict 리스트 기반, pandas 불필요)
 # ============================================================
 
-def _build_settlement_index(s_df: pd.DataFrame) -> dict:
-    """
-    정산 시트를 미리 인덱싱하여 O(1) 룩업이 가능하게 합니다.
-    key: (normalized_branch, normalized_name) → [(s_idx, s_dict, norm_room)]
-    """
-    index = defaultdict(list)
-    for s_idx, s_row in s_df.iterrows():
-        s_dict = s_row.to_dict()
+def run_matching(
+    settlement_data: list[dict],
+    termination_data: list[dict],
+    threshold: int = FUZZY_THRESHOLD,
+) -> list[MatchResult]:
+    """전체 매칭 실행"""
+    results = []
+    matched_indices: set[int] = set()
+
+    # 정산 시트 사전 인덱싱
+    s_index = defaultdict(list)
+    s_prepared = []
+    for s_idx, s_dict in enumerate(settlement_data):
         s_branch = normalize_text(get_col(s_dict, "지점명"))
         s_name_raw = extract_name(s_dict, "계약자명", NAME_FALLBACK_COLUMNS_SETTLEMENT)
         s_name = normalize_name(s_name_raw)
         s_room = normalize_text(get_col(s_dict, "호실"))
-        index[(s_branch, s_name)].append((s_idx, s_dict, s_room, s_name_raw))
-    return index
+        s_index[(s_branch, s_name)].append((s_idx, s_dict, s_room, s_name_raw))
+        s_prepared.append((s_idx, s_dict, get_col(s_dict, "지점명"), s_name_raw, get_col(s_dict, "호실")))
 
-
-# ============================================================
-# 매칭 엔진
-# ============================================================
-
-def run_matching(
-    settlement_df: pd.DataFrame,
-    termination_df: pd.DataFrame,
-    threshold: int = FUZZY_THRESHOLD,
-) -> list[MatchResult]:
-    """전체 매칭 실행, 결과 리스트 반환"""
-    results = []
-    matched_indices: set[int] = set()
-
-    # 정산 시트 사전 인덱싱 (속도 최적화 핵심)
-    s_index = _build_settlement_index(settlement_df)
-
-    # 퍼지 매칭용 리스트 (사전에 준비)
-    s_rows_for_fuzzy = []
-    for s_idx, s_row in settlement_df.iterrows():
-        s_dict = s_row.to_dict()
-        s_branch = get_col(s_dict, "지점명")
-        s_name_raw = extract_name(s_dict, "계약자명", NAME_FALLBACK_COLUMNS_SETTLEMENT)
-        s_room = get_col(s_dict, "호실")
-        s_rows_for_fuzzy.append((s_idx, s_dict, s_branch, s_name_raw, s_room))
-
-    for t_idx, t_row in termination_df.iterrows():
-        t_dict = t_row.to_dict()
-
-        result = _exact_match_indexed(t_idx, t_dict, s_index, matched_indices)
+    for t_idx, t_dict in enumerate(termination_data):
+        result = _exact_match(t_idx, t_dict, s_index, matched_indices)
         if result is None:
-            result = _fuzzy_match_fast(t_idx, t_dict, s_rows_for_fuzzy, matched_indices, threshold)
+            result = _fuzzy_match(t_idx, t_dict, s_prepared, matched_indices, threshold)
         if result is None:
             result = MatchResult(
                 termination_index=t_idx,
@@ -210,8 +178,7 @@ def run_matching(
     return results
 
 
-def _exact_match_indexed(t_idx, t_row, s_index, matched) -> Optional[MatchResult]:
-    """인덱스 기반 O(1) 정확 매칭"""
+def _exact_match(t_idx, t_row, s_index, matched) -> Optional[MatchResult]:
     t_branch = normalize_text(get_col(t_row, "지점명"))
     t_room = normalize_text(get_col(t_row, "호실"))
     t_name_raw = extract_name(t_row, "계약자명", NAME_FALLBACK_COLUMNS_TERMINATION)
@@ -224,12 +191,12 @@ def _exact_match_indexed(t_idx, t_row, s_index, matched) -> Optional[MatchResult
     used_fb = (not original.strip()) and t_name_raw.strip()
     fb_note = " (주민번호칸 이름)" if used_fb else ""
 
-    # (branch, name) 키로 O(1) 룩업
     candidates = s_index.get((t_branch, t_name), [])
-    for s_idx, s_dict, s_room, s_name_raw in candidates:
+
+    # 호실까지 일치하는 것 먼저
+    for s_idx, s_dict, s_room, _ in candidates:
         if s_idx in matched:
             continue
-        # 호실까지 일치
         if t_room == s_room:
             return MatchResult(
                 termination_index=t_idx, settlement_index=s_idx,
@@ -238,8 +205,8 @@ def _exact_match_indexed(t_idx, t_row, s_index, matched) -> Optional[MatchResult
                 termination_row=t_row, settlement_row=s_dict,
             )
 
-    # 호실 비어있는 경우에도 매칭 시도
-    for s_idx, s_dict, s_room, s_name_raw in candidates:
+    # 호실 비어있는 경우
+    for s_idx, s_dict, s_room, _ in candidates:
         if s_idx in matched:
             continue
         if not t_room or not s_room:
@@ -253,8 +220,7 @@ def _exact_match_indexed(t_idx, t_row, s_index, matched) -> Optional[MatchResult
     return None
 
 
-def _fuzzy_match_fast(t_idx, t_row, s_rows, matched, threshold) -> Optional[MatchResult]:
-    """사전 준비된 리스트로 퍼지 매칭"""
+def _fuzzy_match(t_idx, t_row, s_prepared, matched, threshold) -> Optional[MatchResult]:
     t_branch = get_col(t_row, "지점명")
     t_name_raw = extract_name(t_row, "계약자명", NAME_FALLBACK_COLUMNS_TERMINATION)
     t_room = get_col(t_row, "호실")
@@ -271,18 +237,19 @@ def _fuzzy_match_fast(t_idx, t_row, s_rows, matched, threshold) -> Optional[Matc
 
     best_score, best_idx, best_row, best_detail = 0.0, None, None, ""
 
-    for s_idx, s_dict, s_branch, s_name_raw, s_room in s_rows:
+    for s_idx, s_dict, s_branch, s_name_raw, s_room in s_prepared:
         if s_idx in matched:
             continue
 
         s_branch_norm = normalize_text(s_branch)
-        s_name_norm = normalize_name(s_name_raw)
-        s_room_norm = normalize_text(s_room)
 
-        # 지점명이 완전히 다르면 스킵 (최적화)
+        # 지점명이 완전히 다르면 스킵 (조기 종료로 속도 향상)
         br = fuzz.ratio(t_branch_norm, s_branch_norm) if t_branch_norm and s_branch_norm else 0
         if br < 50:
             continue
+
+        s_name_norm = normalize_name(s_name_raw)
+        s_room_norm = normalize_text(s_room)
 
         cn = max(fuzz.ratio(t_name_norm, s_name_norm), fuzz.token_sort_ratio(t_name_norm, s_name_norm)) if t_name_norm and s_name_norm else 0
         rm = fuzz.ratio(t_room_norm, s_room_norm) if t_room_norm and s_room_norm else 100
@@ -338,7 +305,6 @@ def _cross_verify(result: MatchResult) -> MatchResult:
 # ============================================================
 
 def results_to_json(results: list[MatchResult]) -> list[dict]:
-    """MatchResult 리스트를 JSON-serializable dict 리스트로 변환"""
     out = []
     for r in results:
         out.append({
@@ -363,14 +329,8 @@ def results_to_json(results: list[MatchResult]) -> list[dict]:
 
 
 def summary(results: list[MatchResult]) -> dict:
-    """매칭 결과 요약"""
     total = len(results)
     exact = sum(1 for r in results if r.status == MatchStatus.EXACT)
     fuzzy_ = sum(1 for r in results if r.status == MatchStatus.FUZZY)
     unmatched = sum(1 for r in results if r.status == MatchStatus.UNMATCHED)
-    return {
-        "total": total,
-        "exact": exact,
-        "fuzzy": fuzzy_,
-        "unmatched": unmatched,
-    }
+    return {"total": total, "exact": exact, "fuzzy": fuzzy_, "unmatched": unmatched}
