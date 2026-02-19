@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>스페이스액스키 계약 종료 동기화</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📋</text></svg>">
   <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
   <style>
     :root { --bg: #0f172a; --card: #1e293b; --border: #334155; --accent: #3b82f6; --danger: #ef4444; --success: #22c55e; --warn: #f59e0b; --text: #e2e8f0; --muted: #94a3b8; }
@@ -71,9 +72,11 @@
       <div class="card p-8 max-w-md mx-auto">
         <h2 class="text-xl font-bold mb-1">로그인</h2>
         <p class="text-sm mb-6" style="color:var(--muted)">비밀번호를 입력하세요</p>
-        <input type="password" id="passwordInput" placeholder="비밀번호" onkeydown="if(event.key==='Enter')doLogin()">
-        <div id="loginError" class="text-sm mt-2" style="color:var(--danger);display:none"></div>
-        <button class="btn btn-primary w-full mt-4" onclick="doLogin()" id="loginBtn">로그인</button>
+        <form onsubmit="event.preventDefault(); doLogin();" autocomplete="off">
+          <input type="password" id="passwordInput" placeholder="비밀번호" autocomplete="current-password">
+          <div id="loginError" class="text-sm mt-2" style="color:var(--danger);display:none"></div>
+          <button type="submit" class="btn btn-primary w-full mt-4" id="loginBtn">로그인</button>
+        </form>
       </div>
     </div>
 
@@ -202,7 +205,13 @@
         headers: { 'Content-Type': 'application/json', 'X-Password': password },
         body: JSON.stringify(body),
       });
-      return await res.json();
+      const text = await res.text();
+      try {
+        return JSON.parse(text);
+      } catch (e) {
+        console.error('API 응답 파싱 실패:', text.substring(0, 200));
+        return { ok: false, error: `서버 오류 (HTTP ${res.status}): API가 아직 준비되지 않았습니다. Vercel 환경변수 설정을 확인해주세요.` };
+      }
     }
 
     // ======================== STEP 1: 로그인 ========================
@@ -354,8 +363,7 @@
       setTimeout(() => div.remove(), 4000);
     }
 
-    // 엔터키로 로그인
-    document.getElementById('passwordInput').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+    // form submit으로 로그인 처리 (엔터키 포함)
   </script>
 </body>
 </html>

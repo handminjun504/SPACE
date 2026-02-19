@@ -1,12 +1,14 @@
 {
   "version": 2,
   "builds": [
-    { "src": "api/**/*.py", "use": "@vercel/python" },
-    { "src": "public/**", "use": "@vercel/static" }
+    { "src": "api/auth.py", "use": "@vercel/python" },
+    { "src": "api/preview.py", "use": "@vercel/python" },
+    { "src": "api/sync.py", "use": "@vercel/python" }
   ],
   "routes": [
-    { "src": "/api/(.*)", "dest": "/api/$1" },
+    { "src": "/api/auth", "dest": "/api/auth.py" },
+    { "src": "/api/preview", "dest": "/api/preview.py" },
+    { "src": "/api/sync", "dest": "/api/sync.py" },
     { "src": "/(.*)", "dest": "/public/$1" }
   ]
 }
-
