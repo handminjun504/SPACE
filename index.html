@@ -73,6 +73,7 @@
         <h2 class="text-xl font-bold mb-1">로그인</h2>
         <p class="text-sm mb-6" style="color:var(--muted)">비밀번호를 입력하세요</p>
         <form onsubmit="event.preventDefault(); doLogin();" autocomplete="off">
+          <input type="text" name="username" autocomplete="username" style="display:none" tabindex="-1" aria-hidden="true">
           <input type="password" id="passwordInput" placeholder="비밀번호" autocomplete="current-password">
           <div id="loginError" class="text-sm mt-2" style="color:var(--danger);display:none"></div>
           <button type="submit" class="btn btn-primary w-full mt-4" id="loginBtn">로그인</button>

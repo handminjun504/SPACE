@@ -11,7 +11,11 @@ selected_indices: 미리보기 결과에서 사용자가 선택한 항목의 인
 
 import json
 import os
+import sys
 from http.server import BaseHTTPRequestHandler
+
+# Vercel 런타임에서 _lib 모듈을 찾을 수 있도록 경로 추가
+sys.path.insert(0, os.path.dirname(__file__))
 
 import pandas as pd
 
