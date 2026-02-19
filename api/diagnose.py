@@ -230,17 +230,7 @@ class handler(BaseHTTPRequestHandler):
                         phase_counts["P4_퍼지"] += 1  # fallback
 
                 rejected_count = 0  # v7에서는 hard reject 없음
-
-                # 거부 사유 샘플 (처음 10개)
                 rejected_samples = []
-                for r in rejected[:10]:
-                    rejected_samples.append({
-                        "t_idx": r.termination_index,
-                        "t_name": extract_name(r.termination_row, "계약자명", ["주민 번호", "상호"])[:15],
-                        "t_branch": get_col(r.termination_row, "지점명")[:20],
-                        "t_room": get_col(r.termination_row, "호실")[:10],
-                        "details": r.match_details[:150],
-                    })
 
                 # 매칭된 결과 샘플 (처음 5개)
                 match_samples = []
