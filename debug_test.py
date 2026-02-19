@@ -72,6 +72,10 @@ def test_full():
                 if "matched" in s: extras.append(f"matched={s['matched']}")
                 if "exact" in s: extras.append(f"exact={s['exact']}")
                 if "fuzzy" in s: extras.append(f"fuzzy={s['fuzzy']}")
+                if "phases" in s: extras.append(f"phases={s['phases']}")
+                if "match_samples" in s:
+                    for ms in s["match_samples"]:
+                        safe_print(f"    sample: t[{ms.get('t_idx')}]={ms.get('t_name','?')[:12]} ↔ s[{ms.get('s_idx')}]={ms.get('s_name','?')[:12]} | {ms.get('details','')[:80]}")
                 if "changes" in s: extras.append(f"changes={s['changes']}")
                 if "resp_bytes" in s: extras.append(f"size={s['resp_bytes']}B")
                 if "common_branches" in s: extras.append(f"branches_overlap={s['common_branches']}/{s['t_branches']}")

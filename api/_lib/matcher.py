@@ -334,6 +334,13 @@ def run_matching(
         results.append(result)
 
     results.sort(key=lambda r: r.termination_index)
+
+    # 매칭 통계 (디버그)
+    print(f"[MATCHER v5] Phase1(이름): {len(t_prepared) - len(unmatched_after_exact)}, "
+          f"Phase2(날짜): {len(unmatched_after_exact) - len(unmatched_after_date)}, "
+          f"Phase3(퍼지): {sum(1 for r in results if r.settlement_index is not None) - (len(t_prepared) - len(unmatched_after_date))}, "
+          f"미매칭: {sum(1 for r in results if r.settlement_index is None)}/{len(t_prepared)}")
+
     return results
 
 
