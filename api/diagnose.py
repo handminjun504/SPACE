@@ -333,7 +333,7 @@ class handler(BaseHTTPRequestHandler):
                 }
 
                 # Show sample overlapping and non-overlapping names
-                if target_branch and normalize_text(target_branch) == bn:
+                if target_branch and (normalize_text(target_branch) in bn or bn in normalize_text(target_branch)):
                     entry["overlap_names_sample"] = sorted(list(overlap))[:20]
                     t_only = t_name_set - s_name_set
                     entry["t_only_names_sample"] = sorted(list(t_only))[:20]
