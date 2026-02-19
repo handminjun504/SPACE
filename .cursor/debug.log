@@ -1,0 +1,1 @@
+{"hypothesisId": "F", "location": "diagnose:full", "message": "full_pipeline_result", "data": {"status": -1, "data": {"error": "UnicodeEncodeError: 'latin-1' codec can't encode characters in position 0-1: ordinal not in range(256)"}, "elapsed": 0.05}, "timestamp": 1771474446279, "runId": "fullpipe-run-1"}

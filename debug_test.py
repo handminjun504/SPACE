@@ -7,6 +7,7 @@ import os
 import time
 import urllib.request
 import urllib.error
+import urllib.parse
 
 VERCEL_URL = "https://space-ten-beta.vercel.app"
 TERM_URL = "https://docs.google.com/spreadsheets/d/1vAcqZOW3YNggesUcjBH2yzdYsenRgdqKLPS0rJ7cISw/edit?gid=921887178#gid=921887178"
@@ -53,16 +54,11 @@ def main():
     print("Vercel 504 전체 파이프라인 진단")
     print("=" * 60)
 
-    # 전체 파이프라인 진단
+    # 전체 파이프라인 진단 (query param으로 한글 전달)
+    params = urllib.parse.urlencode({"term_url": TERM_URL, "term_ws": TERM_WS})
+    diag_url = f"{VERCEL_URL}/api/diagnose?{params}"
     print(f"\n>>> 호출: {VERCEL_URL}/api/diagnose (최대 120초)")
-    result = http_get(
-        f"{VERCEL_URL}/api/diagnose",
-        headers={
-            "X-Termination-Url": TERM_URL,
-            "X-Termination-Ws": TERM_WS,
-        },
-        timeout=120,
-    )
+    result = http_get(diag_url, timeout=120)
     print(f"<<< 응답: HTTP {result['status']} ({result['elapsed']}s)")
     log_entry("F", "diagnose:full", "full_pipeline_result", result)
 

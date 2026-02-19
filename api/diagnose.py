@@ -9,6 +9,7 @@ import sys
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -69,8 +70,9 @@ class handler(BaseHTTPRequestHandler):
             return self._respond(steps, t0, "TIMEOUT_RISK after settlement")
 
         # Step 4: 종료 시트 읽기
-        term_url = self.headers.get("X-Termination-Url", "")
-        term_ws = self.headers.get("X-Termination-Ws", "계약 종료")
+        qs = parse_qs(urlparse(self.path).query)
+        term_url = qs.get("term_url", [self.headers.get("X-Termination-Url", "")])[0]
+        term_ws = qs.get("term_ws", [self.headers.get("X-Termination-Ws", "\uacc4\uc57d \uc885\ub8cc")])[0]
         if not term_url:
             steps.append({"step": "4_termination_read", "ok": False, "error": "X-Termination-Url 헤더 필요"})
             return self._respond(steps, t0)
