@@ -25,7 +25,7 @@ from rapidfuzz import fuzz, process as rfprocess
 # ============================================================
 # 설정 상수
 # ============================================================
-FUZZY_THRESHOLD = 75          # 종합 매칭 임계값 (%)
+FUZZY_THRESHOLD = 80          # 종합 매칭 임계값 (%)
 FUZZY_TIME_LIMIT = 15         # 퍼지 매칭 최대 시간 (초)
 DATE_MATCH_NAME_THRESHOLD = 40  # 날짜 매칭 시 이름 유사도 최소값
 
@@ -199,10 +199,12 @@ def _prepare_settlement(data: list[dict]) -> tuple[
     dict[tuple, list[PreparedRow]],    # exact_index: (branch, name) → rows
     dict[str, list[PreparedRow]],      # branch_index: branch → rows
     dict[tuple, list[PreparedRow]],    # date_index: (branch, start, end) → rows
+    dict[tuple, list[PreparedRow]],    # end_date_index: (branch, end) → rows
 ]:
     exact_index = defaultdict(list)
     branch_index = defaultdict(list)
     date_index = defaultdict(list)
+    end_date_index = defaultdict(list)
 
     for idx, row in enumerate(data):
         pr = PreparedRow(
@@ -218,11 +220,15 @@ def _prepare_settlement(data: list[dict]) -> tuple[
         exact_index[(pr.branch_norm, pr.name_norm)].append(pr)
         branch_index[pr.branch_norm].append(pr)
 
-        # 날짜 인덱스: 지점 + 시작일 + 종료일 (모두 있는 경우만)
+        # 날짜 인덱스: 시작일+종료일 모두 있는 경우
         if pr.branch_norm and pr.start_date and pr.end_date:
             date_index[(pr.branch_norm, pr.start_date, pr.end_date)].append(pr)
 
-    return exact_index, branch_index, date_index
+        # 만기일 단독 인덱스: 만기일만 있어도 됨
+        if pr.branch_norm and pr.end_date:
+            end_date_index[(pr.branch_norm, pr.end_date)].append(pr)
+
+    return exact_index, branch_index, date_index, end_date_index
 
 
 def _prepare_termination(data: list[dict]) -> list[PreparedRow]:
@@ -267,7 +273,7 @@ def run_matching(
 ) -> list[MatchResult]:
     t0 = time.time()
 
-    exact_index, branch_index, date_index = _prepare_settlement(settlement_data)
+    exact_index, branch_index, date_index, end_date_index = _prepare_settlement(settlement_data)
     t_prepared = _prepare_termination(termination_data)
     fuzzy_idx = _build_fuzzy_index(branch_index)
 
@@ -285,10 +291,10 @@ def run_matching(
         else:
             unmatched_after_exact.append(tp)
 
-    # === Phase 2: 날짜 기반 매칭 (지점 + 시작일 + 만기일 일치 → 이름 유사도 확인) ===
+    # === Phase 2a: 날짜 기반 매칭 (지점 + 시작일 + 만기일 → 이름 유사도) ===
     unmatched_after_date = []
     for tp in unmatched_after_exact:
-        result = _date_match(tp, date_index, matched_indices)
+        result = _date_match(tp, date_index, end_date_index, matched_indices)
         if result is not None:
             result = _cross_verify(result)
             matched_indices.add(result.settlement_index)
@@ -384,68 +390,109 @@ def _exact_match(tp: PreparedRow, exact_index, matched) -> Optional[MatchResult]
 # Phase 2: 날짜 기반 매칭 (지점 + 시작일 + 만기일 → 이름 유사도 확인)
 # ============================================================
 
-def _date_match(tp: PreparedRow, date_index, matched) -> Optional[MatchResult]:
+def _date_match(tp: PreparedRow, date_index, end_date_index, matched) -> Optional[MatchResult]:
     """
-    지점명 + 계약 시작일 + 계약 만기일이 동일한 정산 건을 찾고,
-    이름 유사도가 최소 기준 이상이면 매칭으로 판정합니다.
-    날짜가 정확히 일치하면 동일 계약일 가능성이 매우 높습니다.
+    날짜 기반 매칭:
+    1차: 지점 + 시작일 + 만기일 모두 일치 (가장 정확)
+    2차: 지점 + 만기일만 일치 (종료 시트에 시작일이 3%만 있으므로)
+    → 이름 유사도가 최소 기준 이상이면 매칭
+
+    실제 데이터: 종료 시트 시작일 3.1%, 만기일 19.7%
     """
-    if not tp.branch_norm or not tp.start_date or not tp.end_date:
+    if not tp.branch_norm:
         return None
 
-    candidates = date_index.get((tp.branch_norm, tp.start_date, tp.end_date), [])
+    # 시작일+만기일 없으면 날짜 매칭 불가
+    if not tp.start_date and not tp.end_date:
+        return None
+
+    candidates = []
+    match_type = ""
+
+    # 1차: 시작일+만기일 모두 일치 (가장 높은 신뢰도)
+    if tp.start_date and tp.end_date:
+        candidates = date_index.get((tp.branch_norm, tp.start_date, tp.end_date), [])
+        match_type = "시작일+만기일"
+
+    # 2차: 만기일만 일치 (종료 시트에 시작일이 거의 없으므로)
+    if not candidates and tp.end_date:
+        candidates = end_date_index.get((tp.branch_norm, tp.end_date), [])
+        match_type = "만기일"
+
     if not candidates:
         return None
 
+    # 후보 중 가장 유사한 이름 찾기 (+ 호실 보너스)
     best_sp = None
-    best_name_score = 0
+    best_score = 0
 
     for sp in candidates:
         if sp.idx in matched:
             continue
 
-        # 이름 유사도 체크
+        score = 0
+
+        # 이름 유사도
         if tp.name_norm and sp.name_norm:
-            name_score = fuzz.ratio(tp.name_norm, sp.name_norm)
+            score = fuzz.ratio(tp.name_norm, sp.name_norm)
         elif not tp.name_norm and not sp.name_norm:
-            name_score = 100  # 둘 다 이름이 없으면 매칭 허용
-        else:
-            name_score = 0
+            score = 100
+        # 한쪽만 이름이 있으면 score = 0
 
-        # 호실도 일치하면 보너스
+        # 호실 일치 보너스
         if tp.room_norm and sp.room_norm and tp.room_norm == sp.room_norm:
-            name_score = min(100, name_score + 20)
+            score = min(100, score + 20)
 
-        if name_score > best_name_score:
-            best_name_score = name_score
+        # 시작일도 일치하면 추가 보너스
+        if tp.start_date and sp.start_date and tp.start_date == sp.start_date:
+            score = min(100, score + 10)
+
+        if score > best_score:
+            best_score = score
             best_sp = sp
 
     if best_sp is None:
         return None
 
-    # 이름 유사도가 너무 낮으면 매칭 거부
-    if best_name_score < DATE_MATCH_NAME_THRESHOLD:
+    # 이름 유사도가 너무 낮으면 거부 (날짜만 일치하고 이름이 완전 다르면 다른 계약)
+    if best_score < DATE_MATCH_NAME_THRESHOLD:
         return None
 
     original = get_col(tp.row, COL_TERMINATION_NAME)
     fb = " [이름폴백]" if (not original.strip()) and tp.name_raw.strip() else ""
-    detail = (
-        f"날짜매칭: {tp.branch_norm}/"
-        f"시작={tp.start_date[:4]}-{tp.start_date[4:6]}-{tp.start_date[6:]}/"
-        f"만기={tp.end_date[:4]}-{tp.end_date[4:6]}-{tp.end_date[6:]}/"
-        f"이름유사도={best_name_score:.0f}%{fb}"
-    )
 
-    # 날짜 완전 일치 + 이름 유사도에 따라 신뢰도 결정
-    if best_name_score >= 80:
-        confidence = 95.0
-        status = MatchStatus.EXACT
-    elif best_name_score >= 60:
-        confidence = 85.0
-        status = MatchStatus.EXACT
+    # 날짜 포맷팅
+    date_parts = []
+    if tp.start_date:
+        date_parts.append(f"시작={tp.start_date[:4]}-{tp.start_date[4:6]}-{tp.start_date[6:]}")
+    if tp.end_date:
+        date_parts.append(f"만기={tp.end_date[:4]}-{tp.end_date[4:6]}-{tp.end_date[6:]}")
+
+    detail = f"날짜매칭({match_type}): {tp.branch_norm}/{'/'.join(date_parts)}/이름유사도={best_score:.0f}%{fb}"
+
+    # 신뢰도 결정
+    if match_type == "시작일+만기일":
+        # 시작일+만기일 모두 일치 → 높은 신뢰도
+        if best_score >= 70:
+            confidence = 97.0
+            status = MatchStatus.EXACT
+        elif best_score >= 50:
+            confidence = 90.0
+            status = MatchStatus.EXACT
+        else:
+            confidence = 80.0
+            status = MatchStatus.FUZZY
     else:
-        confidence = 75.0
-        status = MatchStatus.FUZZY
+        # 만기일만 일치 → 중간 신뢰도
+        if best_score >= 80:
+            confidence = 92.0
+            status = MatchStatus.EXACT
+        elif best_score >= 60:
+            confidence = 82.0
+            status = MatchStatus.FUZZY
+        else:
+            confidence = 72.0
+            status = MatchStatus.FUZZY
 
     return MatchResult(
         termination_index=tp.idx, settlement_index=best_sp.idx,
@@ -471,8 +518,8 @@ def _fuzzy_match_fast(
 
     names, prs = entry
 
-    # 이름 최소 점수 (낮게 설정하여 날짜 보너스 가능성 확보)
-    name_cutoff = max(30, int(threshold * 0.4))
+    # 이름 최소 점수 (v4 호환: 지점30%+호실20% 제외 후 이름만 기준)
+    name_cutoff = max(40, int((threshold - 30 - 20) / 0.5))
 
     best_match = rfprocess.extractOne(
         tp.name_norm, names,
@@ -509,7 +556,7 @@ def _fuzzy_match_fast(
     else:
         rm = 100
 
-    # 날짜 보너스 (v5 신규)
+    # 날짜 보너스 (v5: 있으면 보너스, 없으면 페널티 없음)
     date_bonus = 0
     date_detail = ""
     if tp.start_date and sp.start_date and tp.start_date == sp.start_date:
@@ -519,8 +566,9 @@ def _fuzzy_match_fast(
         date_bonus += 10
         date_detail += "+만기일일치" if date_detail else "만기일일치"
 
-    # 종합 점수: 지점(30%) + 이름(35%) + 호실(15%) + 날짜보너스(최대 20%)
-    total = 100 * 0.30 + name_score * 0.35 + rm * 0.15 + date_bonus
+    # 종합 점수 = v4 기본(지점30% + 이름50% + 호실20%) + 날짜보너스(최대 +20)
+    # → 날짜 없이도 v4와 동일한 점수, 날짜 일치하면 보너스로 상승
+    total = 100 * 0.3 + name_score * 0.5 + rm * 0.2 + date_bonus
 
     if total < threshold:
         return None
