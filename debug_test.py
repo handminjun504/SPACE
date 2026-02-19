@@ -1,6 +1,6 @@
 """
-Vercel 504 디버깅 스크립트
-/api/health와 /api/diagnose를 호출하여 결과를 debug.log에 기록합니다.
+504 타임아웃 전체 파이프라인 진단 스크립트
+정산 시트 + 종료 시트 + 매칭 + 변경감지 전체를 테스트합니다.
 """
 import json
 import os
@@ -8,100 +8,105 @@ import time
 import urllib.request
 import urllib.error
 
-BASE_URL = "https://space-ten-beta.vercel.app"
-LOG_PATH = os.path.join(os.path.dirname(__file__), ".cursor", "debug.log")
+VERCEL_URL = "https://space-ten-beta.vercel.app"
+TERM_URL = "https://docs.google.com/spreadsheets/d/1vAcqZOW3YNggesUcjBH2yzdYsenRgdqKLPS0rJ7cISw/edit?gid=921887178#gid=921887178"
+TERM_WS = "\uacc4\uc57d \uc885\ub8cc"
 
-os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cursor", "debug.log")
 
 
-def log_entry(hypothesis_id, location, message, data=None):
+def log_entry(hyp, loc, msg, data=None):
+    os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
     entry = {
-        "id": f"log_{int(time.time()*1000)}",
-        "timestamp": int(time.time() * 1000),
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "message": message,
-        "data": data or {},
-        "runId": "diagnose-run-1",
+        "hypothesisId": hyp, "location": loc, "message": msg,
+        "data": data or {}, "timestamp": int(time.time()*1000),
+        "runId": "fullpipe-run-1",
     }
     with open(LOG_PATH, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     try:
-        print(f"  [{hypothesis_id}] {message}: {json.dumps(data, ensure_ascii=True) if data else ''}")
+        print(f"  [{hyp}] {msg}: {json.dumps(data, ensure_ascii=True) if data else ''}")
     except Exception:
-        print(f"  [{hypothesis_id}] {message}: (print encoding error)")
+        print(f"  [{hyp}] {msg}: (encoding error)")
 
 
-def call_api(endpoint, timeout=65):
-    url = f"{BASE_URL}{endpoint}"
-    print(f"\n>>> 호출: {url} (timeout={timeout}s)")
+def http_get(url, headers=None, timeout=120):
+    req = urllib.request.Request(url, headers=headers or {}, method="GET")
     t0 = time.time()
     try:
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            status = resp.status
-            body = resp.read().decode("utf-8")
-            elapsed = round(time.time() - t0, 2)
-            print(f"<<< 응답: HTTP {status} ({elapsed}s)")
-            try:
-                return {"status": status, "data": json.loads(body), "elapsed": elapsed}
-            except json.JSONDecodeError:
-                return {"status": status, "data": body[:500], "elapsed": elapsed}
+        resp = urllib.request.urlopen(req, timeout=timeout)
+        data = json.loads(resp.read())
+        return {"status": resp.status, "data": data, "elapsed": round(time.time()-t0, 2)}
     except urllib.error.HTTPError as e:
-        elapsed = round(time.time() - t0, 2)
-        body = e.read().decode("utf-8", errors="replace")[:500]
-        print(f"<<< HTTP 에러: {e.code} ({elapsed}s) - {body[:100]}")
-        return {"status": e.code, "data": body, "elapsed": elapsed}
-    except urllib.error.URLError as e:
-        elapsed = round(time.time() - t0, 2)
-        print(f"<<< 연결 에러: {e.reason} ({elapsed}s)")
-        return {"status": 0, "data": str(e.reason), "elapsed": elapsed}
+        body = e.read().decode("utf-8", errors="replace")
+        try:
+            data = json.loads(body)
+        except Exception:
+            data = {"raw": body[:500]}
+        return {"status": e.code, "data": data, "elapsed": round(time.time()-t0, 2)}
     except Exception as e:
-        elapsed = round(time.time() - t0, 2)
-        print(f"<<< 에러: {type(e).__name__}: {e} ({elapsed}s)")
-        return {"status": 0, "data": str(e), "elapsed": elapsed}
+        return {"status": -1, "data": {"error": f"{type(e).__name__}: {e}"}, "elapsed": round(time.time()-t0, 2)}
 
 
 def main():
     print("=" * 60)
-    print("Vercel 504 디버깅 시작")
+    print("Vercel 504 전체 파이프라인 진단")
     print("=" * 60)
 
-    # 1) Health check (가설 D, E)
-    print("\n[1/2] Health 체크...")
-    health = call_api("/api/health", timeout=30)
-    log_entry("D", "debug_test.py:health", "health_response", health)
-    log_entry("E", "debug_test.py:health", "maxDuration_check",
-              {"http_status": health["status"], "elapsed": health.get("elapsed")})
+    # 전체 파이프라인 진단
+    print(f"\n>>> 호출: {VERCEL_URL}/api/diagnose (최대 120초)")
+    result = http_get(
+        f"{VERCEL_URL}/api/diagnose",
+        headers={
+            "X-Termination-Url": TERM_URL,
+            "X-Termination-Ws": TERM_WS,
+        },
+        timeout=120,
+    )
+    print(f"<<< 응답: HTTP {result['status']} ({result['elapsed']}s)")
+    log_entry("F", "diagnose:full", "full_pipeline_result", result)
 
-    # 2) Diagnose - 단계별 타이밍 (가설 A, B, C)
-    print("\n[2/2] 진단 (최대 65초 대기)...")
-    diag = call_api("/api/diagnose", timeout=65)
-    log_entry("A", "debug_test.py:diagnose", "cold_start_timing", diag)
+    if result["status"] == 200 and "steps" in result.get("data", {}):
+        steps = result["data"]["steps"]
+        prev_time = 0
+        for s in steps:
+            step_time = s.get("elapsed_s", 0)
+            delta = round(step_time - prev_time, 3)
+            ok = "OK" if s.get("ok") else "FAIL"
+            extras = ""
+            if "rows" in s:
+                extras += f" rows={s['rows']}"
+            if "matched" in s:
+                extras += f" matched={s['matched']}"
+            if "change_count" in s:
+                extras += f" changes={s['change_count']}"
+            if "payload_bytes" in s:
+                extras += f" payload={s['payload_bytes']}B"
+            if "error" in s:
+                extras += f" error={s['error'][:100]}"
+            if "tb" in s:
+                extras += f"\n    traceback: {s['tb'][:300]}"
 
-    if isinstance(diag.get("data"), dict) and "steps" in diag["data"]:
-        steps = diag["data"]["steps"]
-        for step in steps:
-            step_name = step.get("step", "unknown")
-            if "import" in step_name:
-                log_entry("A", f"diagnose:{step_name}", "import_timing", step)
-            elif "client" in step_name:
-                log_entry("A", f"diagnose:{step_name}", "client_timing", step)
-            elif "settlement_open" in step_name:
-                log_entry("B", f"diagnose:{step_name}", "settlement_open_timing", step)
-            elif "settlement_read" in step_name:
-                log_entry("B", f"diagnose:{step_name}", "settlement_read_timing", step)
-            elif "TIMEOUT" in step_name:
-                log_entry("E", f"diagnose:{step_name}", "timeout_risk", step)
+            print(f"  {ok} {s['step']}: {step_time}s (delta={delta}s){extras}")
+            log_entry(
+                "F" if "matching" not in s.get("step", "") else "F",
+                f"diagnose:{s['step']}",
+                s["step"],
+                {"elapsed_s": step_time, "delta_s": delta, "ok": s.get("ok"), **{k: s[k] for k in s if k not in ("step", "ok", "elapsed_s")}},
+            )
+            prev_time = step_time
+
+        total = result["data"].get("total_elapsed_s", "?")
+        print(f"\n  총 소요시간: {total}s")
+        if result["data"].get("warning"):
+            print(f"  경고: {result['data']['warning']}")
     else:
-        log_entry("E", "debug_test.py:diagnose", "diagnose_failed",
-                  {"status": diag["status"], "hint": "504면 maxDuration 미적용 또는 함수 크래시"})
+        print(f"  비정상 응답: {json.dumps(result.get('data', {}), ensure_ascii=True)[:500]}")
 
-    print(f"\n{'=' * 60}")
-    print(f"완료! 로그 파일: {LOG_PATH}")
-    print(f"{'=' * 60}")
+    print(f"\n{'='*60}")
+    print(f"로그 저장: {LOG_PATH}")
+    print(f"{'='*60}")
 
 
 if __name__ == "__main__":
     main()
-
