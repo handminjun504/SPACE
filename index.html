@@ -234,17 +234,45 @@
     }
 
     // ======================== API 호출 ========================
+    // #region agent log
+    function _dbg(loc, msg, data) {
+      fetch('http://127.0.0.1:7242/ingest/ece72a4b-3fda-4c20-9f07-a27dbe7e232f',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:loc,message:msg,data:data||{},timestamp:Date.now(),runId:'frontend',hypothesisId:'FE'})}).catch(()=>{});
+    }
+    // #endregion
+
     async function api(endpoint, body = {}) {
-      const res = await fetch('/api/' + endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Password': password },
-        body: JSON.stringify(body),
-      });
+      // #region agent log
+      const t0 = Date.now();
+      _dbg('api:start', 'fetch_begin', {endpoint, bodySize: JSON.stringify(body).length});
+      // #endregion
+      let res;
+      try {
+        res = await fetch('/api/' + endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Password': password },
+          body: JSON.stringify(body),
+        });
+      } catch (fetchErr) {
+        // #region agent log
+        _dbg('api:fetch_error', 'network_error', {endpoint, error: fetchErr.message, elapsed_ms: Date.now()-t0});
+        // #endregion
+        return { ok: false, error: '네트워크 오류: ' + fetchErr.message };
+      }
+      // #region agent log
+      const t1 = Date.now();
+      _dbg('api:response', 'fetch_done', {endpoint, status: res.status, elapsed_ms: t1-t0});
+      // #endregion
       const text = await res.text();
+      // #region agent log
+      _dbg('api:body', 'body_read', {endpoint, status: res.status, bodyLen: text.length, elapsed_ms: Date.now()-t0, textPreview: text.substring(0, 200)});
+      // #endregion
       try {
         return JSON.parse(text);
       } catch (e) {
         console.error('API 응답 파싱 실패:', text.substring(0, 200));
+        // #region agent log
+        _dbg('api:parse_fail', 'json_parse_error', {endpoint, status: res.status, bodyLen: text.length, textPreview: text.substring(0, 300), elapsed_ms: Date.now()-t0});
+        // #endregion
         if (res.status === 504) {
           return { ok: false, error: '⏱️ 서버 시간 초과 (504): 데이터가 너무 많거나 첫 실행 시 느릴 수 있습니다. 30초 후 다시 시도해주세요.' };
         }
@@ -274,14 +302,21 @@
     async function doPreview() {
       const btn = document.getElementById('previewBtn');
       const url = document.getElementById('termUrlInput').value.trim();
-      const ws = document.getElementById('wsNameInput').value.trim() || 'Sheet1';
+      const ws = document.getElementById('wsNameInput').value.trim() || '계약 종료';
       if (!url) { showError('previewError', '종료 시트 URL을 입력하세요'); return; }
       btn.disabled = true;
       btn.innerHTML = '<span class="spinner"></span> 매칭 분석 중... (10~30초 소요)';
       hideError('previewError');
 
+      // #region agent log
+      _dbg('doPreview:start', 'preview_begin', {url: url.substring(0, 60), ws});
+      // #endregion
+
       try {
         const data = await api('preview', { termination_url: url, worksheet_name: ws });
+        // #region agent log
+        _dbg('doPreview:result', 'preview_done', {ok: data.ok, _v: data._v, summary: data.summary, elapsed: data.elapsed_seconds, error: data.error});
+        // #endregion
         btn.disabled = false;
         btn.textContent = '매칭 미리보기';
         if (!data.ok) { showError('previewError', data.error); return; }
@@ -289,6 +324,9 @@
         renderResults(data);
         goStep(3);
       } catch (e) {
+        // #region agent log
+        _dbg('doPreview:error', 'preview_exception', {error: e.message});
+        // #endregion
         btn.disabled = false;
         btn.textContent = '매칭 미리보기';
         showError('previewError', '네트워크 오류: ' + e.message);
@@ -443,7 +481,7 @@
       btn.innerHTML = '<span class="spinner"></span> 시트 업데이트 중...';
 
       const url = document.getElementById('termUrlInput').value.trim();
-      const ws = document.getElementById('wsNameInput').value.trim() || 'Sheet1';
+      const ws = document.getElementById('wsNameInput').value.trim() || '계약 종료';
 
       try {
         const data = await api('sync', {
