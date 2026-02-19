@@ -1,0 +1,39 @@
+# 환경변수
+.env
+
+# 인증 파일
+credentials/*.json
+credentials/*.p12
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# 가상환경
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 출력 파일
+output/*.csv
+output/*.xlsx
+
+# Vercel
+.vercel/
+node_modules/
+
+# OS
+Thumbs.db
+.DS_Store
+

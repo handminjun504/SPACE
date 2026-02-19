@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>스페이스액스키 계약 종료 동기화</title>
+  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+  <style>
+    :root { --bg: #0f172a; --card: #1e293b; --border: #334155; --accent: #3b82f6; --danger: #ef4444; --success: #22c55e; --warn: #f59e0b; --text: #e2e8f0; --muted: #94a3b8; }
+    body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; min-height: 100vh; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; }
+    .btn { padding: 10px 24px; border-radius: 8px; font-weight: 600; cursor: pointer; transition: all .15s; display: inline-flex; align-items: center; gap: 8px; }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-primary:hover:not(:disabled) { background: #2563eb; }
+    .btn-danger { background: var(--danger); color: #fff; }
+    .btn-danger:hover:not(:disabled) { background: #dc2626; }
+    .btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text); }
+    .btn-outline:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+    input[type="text"], input[type="password"], select { background: #0f172a; border: 1px solid var(--border); color: var(--text); padding: 10px 14px; border-radius: 8px; width: 100%; outline: none; transition: border .15s; }
+    input:focus, select:focus { border-color: var(--accent); }
+    .badge { padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+    .badge-exact { background: rgba(34,197,94,.15); color: var(--success); }
+    .badge-fuzzy { background: rgba(245,158,11,.15); color: var(--warn); }
+    .badge-fail { background: rgba(239,68,68,.15); color: var(--danger); }
+    .stat-card { text-align: center; padding: 20px; border-radius: 10px; }
+    .stat-num { font-size: 32px; font-weight: 700; line-height: 1; }
+    .stat-label { font-size: 13px; color: var(--muted); margin-top: 6px; }
+    table { width: 100%; border-collapse: collapse; }
+    th { text-align: left; padding: 10px 12px; font-size: 12px; text-transform: uppercase; color: var(--muted); border-bottom: 1px solid var(--border); }
+    td { padding: 10px 12px; border-bottom: 1px solid rgba(51,65,85,.5); font-size: 14px; }
+    tr:hover td { background: rgba(59,130,246,.05); }
+    .check-col { width: 40px; text-align: center; }
+    input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+    .spinner { display: inline-block; width: 18px; height: 18px; border: 2px solid rgba(255,255,255,.3); border-top-color: #fff; border-radius: 50%; animation: spin .6s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .fade-in { animation: fadeIn .3s ease; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+    .step { display: none; }
+    .step.active { display: block; }
+    .progress-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--border); }
+    .progress-dot.done { background: var(--success); }
+    .progress-dot.current { background: var(--accent); box-shadow: 0 0 0 4px rgba(59,130,246,.25); }
+    .toast { position: fixed; top: 20px; right: 20px; padding: 14px 20px; border-radius: 10px; font-weight: 500; z-index: 100; animation: slideIn .3s ease; }
+    @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+    .toast-success { background: rgba(34,197,94,.9); color: #fff; }
+    .toast-error { background: rgba(239,68,68,.9); color: #fff; }
+  </style>
+</head>
+<body class="p-4 md:p-8">
+  <div class="max-w-5xl mx-auto">
+    <!-- 헤더 -->
+    <div class="text-center mb-8">
+      <h1 class="text-2xl md:text-3xl font-bold mb-2">스페이스액스키 계약 종료 동기화</h1>
+      <p class="text-sm" style="color:var(--muted)">종료 시트의 계약 건을 정산 시트에서 자동 매칭하여 강조 표시합니다</p>
+    </div>
+
+    <!-- 진행 바 -->
+    <div class="flex items-center justify-center gap-3 mb-8" id="progressBar">
+      <div class="progress-dot current" id="dot1"></div>
+      <div style="width:40px;height:1px;background:var(--border)"></div>
+      <div class="progress-dot" id="dot2"></div>
+      <div style="width:40px;height:1px;background:var(--border)"></div>
+      <div class="progress-dot" id="dot3"></div>
+      <div style="width:40px;height:1px;background:var(--border)"></div>
+      <div class="progress-dot" id="dot4"></div>
+    </div>
+
+    <!-- STEP 1: 로그인 -->
+    <div id="step1" class="step active fade-in">
+      <div class="card p-8 max-w-md mx-auto">
+        <h2 class="text-xl font-bold mb-1">로그인</h2>
+        <p class="text-sm mb-6" style="color:var(--muted)">비밀번호를 입력하세요</p>
+        <input type="password" id="passwordInput" placeholder="비밀번호" onkeydown="if(event.key==='Enter')doLogin()">
+        <div id="loginError" class="text-sm mt-2" style="color:var(--danger);display:none"></div>
+        <button class="btn btn-primary w-full mt-4" onclick="doLogin()" id="loginBtn">로그인</button>
+      </div>
+    </div>
+
+    <!-- STEP 2: 시트 URL 입력 -->
+    <div id="step2" class="step fade-in">
+      <div class="card p-8 max-w-2xl mx-auto">
+        <h2 class="text-xl font-bold mb-1">종료 시트 입력</h2>
+        <p class="text-sm mb-6" style="color:var(--muted)">스페이스액스키에서 제공받은 계약 종료 시트 URL을 붙여넣기하세요</p>
+        <div class="mb-4">
+          <label class="text-sm font-medium mb-1 block" style="color:var(--muted)">정산 시트 (고정)</label>
+          <div class="flex items-center gap-2 px-3 py-2 rounded-lg" style="background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.2)">
+            <svg width="16" height="16" fill="none" viewBox="0 0 24 24"><path stroke="#22c55e" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+            <span class="text-sm" style="color:var(--success)" id="settlementInfo">연결됨</span>
+          </div>
+        </div>
+        <div class="mb-4">
+          <label class="text-sm font-medium mb-1 block" style="color:var(--muted)">종료 시트 URL *</label>
+          <input type="text" id="termUrlInput" placeholder="https://docs.google.com/spreadsheets/d/...">
+        </div>
+        <div class="mb-6">
+          <label class="text-sm font-medium mb-1 block" style="color:var(--muted)">워크시트(탭) 이름</label>
+          <input type="text" id="wsNameInput" placeholder="Sheet1" value="Sheet1">
+        </div>
+        <div id="previewError" class="text-sm mb-3" style="color:var(--danger);display:none"></div>
+        <button class="btn btn-primary w-full" onclick="doPreview()" id="previewBtn">
+          매칭 미리보기
+        </button>
+      </div>
+    </div>
+
+    <!-- STEP 3: 미리보기 결과 -->
+    <div id="step3" class="step fade-in">
+      <div class="card p-6 mb-4">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-xl font-bold">매칭 결과</h2>
+          <button class="btn btn-outline text-sm" onclick="goStep(2)">← 다시 입력</button>
+        </div>
+        <p class="text-sm mb-4" style="color:var(--muted)" id="sheetInfoText"></p>
+
+        <!-- 통계 카드 -->
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6" id="statsCards">
+          <div class="stat-card" style="background:rgba(59,130,246,.08)">
+            <div class="stat-num" style="color:var(--accent)" id="statTotal">0</div>
+            <div class="stat-label">전체</div>
+          </div>
+          <div class="stat-card" style="background:rgba(34,197,94,.08)">
+            <div class="stat-num" style="color:var(--success)" id="statExact">0</div>
+            <div class="stat-label">정확매칭</div>
+          </div>
+          <div class="stat-card" style="background:rgba(245,158,11,.08)">
+            <div class="stat-num" style="color:var(--warn)" id="statFuzzy">0</div>
+            <div class="stat-label">유사매칭</div>
+          </div>
+          <div class="stat-card" style="background:rgba(239,68,68,.08)">
+            <div class="stat-num" style="color:var(--danger)" id="statFail">0</div>
+            <div class="stat-label">매칭실패</div>
+          </div>
+        </div>
+
+        <!-- 결과 테이블 -->
+        <div class="overflow-x-auto">
+          <table>
+            <thead>
+              <tr>
+                <th class="check-col"><input type="checkbox" id="selectAll" onchange="toggleAll()"></th>
+                <th>상태</th>
+                <th>종료 시트 (지점/계약자/호실)</th>
+                <th>정산 시트 (지점/계약자/호실)</th>
+                <th>만기일</th>
+                <th>신뢰도</th>
+              </tr>
+            </thead>
+            <tbody id="resultsBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="flex gap-3 justify-end">
+        <button class="btn btn-outline" onclick="selectExactOnly()">정확매칭만 선택</button>
+        <button class="btn btn-danger" onclick="doSync()" id="syncBtn">
+          선택 건 동기화 실행 (배경색 + 취소선)
+        </button>
+      </div>
+    </div>
+
+    <!-- STEP 4: 완료 -->
+    <div id="step4" class="step fade-in">
+      <div class="card p-8 max-w-lg mx-auto text-center">
+        <div class="w-16 h-16 mx-auto mb-4 rounded-full flex items-center justify-center" style="background:rgba(34,197,94,.1)">
+          <svg width="32" height="32" fill="none" viewBox="0 0 24 24"><path stroke="#22c55e" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+        </div>
+        <h2 class="text-2xl font-bold mb-2">동기화 완료!</h2>
+        <p class="text-sm mb-2" style="color:var(--muted)" id="completeMsg"></p>
+        <p class="text-sm mb-6" style="color:var(--muted)">정산 시트를 열어 강조 표시를 확인하세요</p>
+        <div class="flex gap-3 justify-center">
+          <button class="btn btn-outline" onclick="goStep(2)">다른 시트 처리</button>
+          <a id="openSheetLink" href="#" target="_blank" class="btn btn-primary">정산 시트 열기 →</a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 토스트 컨테이너 -->
+  <div id="toastContainer"></div>
+
+  <script>
+    let password = '';
+    let previewData = null;
+
+    // ======================== STEP 관리 ========================
+    function goStep(n) {
+      document.querySelectorAll('.step').forEach(s => s.classList.remove('active'));
+      document.getElementById('step' + n).classList.add('active');
+      for (let i = 1; i <= 4; i++) {
+        const dot = document.getElementById('dot' + i);
+        dot.className = 'progress-dot';
+        if (i < n) dot.classList.add('done');
+        else if (i === n) dot.classList.add('current');
+      }
+    }
+
+    // ======================== API 호출 ========================
+    async function api(endpoint, body = {}) {
+      const res = await fetch('/api/' + endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Password': password },
+        body: JSON.stringify(body),
+      });
+      return await res.json();
+    }
+
+    // ======================== STEP 1: 로그인 ========================
+    async function doLogin() {
+      const btn = document.getElementById('loginBtn');
+      const pw = document.getElementById('passwordInput').value;
+      if (!pw) { showError('loginError', '비밀번호를 입력하세요'); return; }
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span> 확인 중...';
+      const data = await api('auth', { password: pw });
+      btn.disabled = false;
+      btn.textContent = '로그인';
+      if (data.ok) {
+        password = pw;
+        goStep(2);
+      } else {
+        showError('loginError', data.error || '로그인 실패');
+      }
+    }
+
+    // ======================== STEP 2: 미리보기 ========================
+    async function doPreview() {
+      const btn = document.getElementById('previewBtn');
+      const url = document.getElementById('termUrlInput').value.trim();
+      const ws = document.getElementById('wsNameInput').value.trim() || 'Sheet1';
+      if (!url) { showError('previewError', '종료 시트 URL을 입력하세요'); return; }
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span> 매칭 분석 중... (10~30초 소요)';
+      hideError('previewError');
+
+      try {
+        const data = await api('preview', { termination_url: url, worksheet_name: ws });
+        btn.disabled = false;
+        btn.textContent = '매칭 미리보기';
+        if (!data.ok) { showError('previewError', data.error); return; }
+        previewData = data;
+        renderResults(data);
+        goStep(3);
+      } catch (e) {
+        btn.disabled = false;
+        btn.textContent = '매칭 미리보기';
+        showError('previewError', '네트워크 오류: ' + e.message);
+      }
+    }
+
+    // ======================== STEP 3: 결과 렌더링 ========================
+    function renderResults(data) {
+      document.getElementById('sheetInfoText').textContent =
+        `정산: "${data.settlement_title}" (${data.settlement_count}행) · 종료: "${data.termination_title}" (${data.termination_count}행)`;
+
+      document.getElementById('statTotal').textContent = data.summary.total;
+      document.getElementById('statExact').textContent = data.summary.exact;
+      document.getElementById('statFuzzy').textContent = data.summary.fuzzy;
+      document.getElementById('statFail').textContent = data.summary.unmatched;
+
+      const tbody = document.getElementById('resultsBody');
+      tbody.innerHTML = '';
+
+      data.results.forEach((r, idx) => {
+        const isMatch = r.status !== '매칭실패';
+        const badgeClass = r.status === '정확매칭' ? 'badge-exact' : r.status.includes('유사') ? 'badge-fuzzy' : 'badge-fail';
+        const checked = r.status === '정확매칭' ? 'checked' : '';
+        const disabled = !isMatch ? 'disabled' : '';
+
+        tbody.innerHTML += `
+          <tr>
+            <td class="check-col"><input type="checkbox" class="row-check" data-idx="${idx}" ${checked} ${disabled}></td>
+            <td><span class="badge ${badgeClass}">${r.status}</span></td>
+            <td>
+              <div class="font-medium">${esc(r.t_branch)}</div>
+              <div class="text-sm" style="color:var(--muted)">${esc(r.t_contractor)} · ${esc(r.t_room || '-')}</div>
+            </td>
+            <td>
+              ${isMatch ? `<div class="font-medium">${esc(r.s_branch)}</div>
+              <div class="text-sm" style="color:var(--muted)">${esc(r.s_contractor)} · ${esc(r.s_room || '-')}</div>` : '<span style="color:var(--muted)">-</span>'}
+            </td>
+            <td>${esc(r.t_expiry || '-')}</td>
+            <td>${isMatch ? r.confidence + '%' : '-'}</td>
+          </tr>`;
+      });
+    }
+
+    function toggleAll() {
+      const checked = document.getElementById('selectAll').checked;
+      document.querySelectorAll('.row-check:not(:disabled)').forEach(cb => cb.checked = checked);
+    }
+
+    function selectExactOnly() {
+      document.querySelectorAll('.row-check').forEach(cb => {
+        const idx = parseInt(cb.dataset.idx);
+        const r = previewData.results[idx];
+        cb.checked = r.status === '정확매칭';
+      });
+      document.getElementById('selectAll').checked = false;
+    }
+
+    function getSelectedIndices() {
+      return Array.from(document.querySelectorAll('.row-check:checked'))
+        .map(cb => parseInt(cb.dataset.idx));
+    }
+
+    // ======================== STEP 3→4: 동기화 실행 ========================
+    async function doSync() {
+      const selected = getSelectedIndices();
+      if (selected.length === 0) { toast('선택된 항목이 없습니다', 'error'); return; }
+      if (!confirm(`${selected.length}건을 정산 시트에 강조 처리하시겠습니까?\n(배경색 + 취소선 적용)`)) return;
+
+      const btn = document.getElementById('syncBtn');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span> 시트 업데이트 중...';
+
+      const url = document.getElementById('termUrlInput').value.trim();
+      const ws = document.getElementById('wsNameInput').value.trim() || 'Sheet1';
+
+      try {
+        const data = await api('sync', {
+          termination_url: url,
+          worksheet_name: ws,
+          selected_indices: selected,
+        });
+        btn.disabled = false;
+        btn.innerHTML = '선택 건 동기화 실행 (배경색 + 취소선)';
+
+        if (data.ok) {
+          document.getElementById('completeMsg').textContent = data.message;
+          const sid = getEnvSettlementId();
+          if (sid) document.getElementById('openSheetLink').href = `https://docs.google.com/spreadsheets/d/${sid}/edit`;
+          goStep(4);
+        } else {
+          toast(data.error, 'error');
+        }
+      } catch (e) {
+        btn.disabled = false;
+        btn.innerHTML = '선택 건 동기화 실행 (배경색 + 취소선)';
+        toast('네트워크 오류: ' + e.message, 'error');
+      }
+    }
+
+    // ======================== 유틸 ========================
+    function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+    function showError(id, msg) { const el = document.getElementById(id); el.style.display = 'block'; el.textContent = msg; }
+    function hideError(id) { document.getElementById(id).style.display = 'none'; }
+    function getEnvSettlementId() { return ''; /* 서버에서 별도 제공 가능 */ }
+    function toast(msg, type = 'success') {
+      const div = document.createElement('div');
+      div.className = `toast toast-${type}`;
+      div.textContent = msg;
+      document.getElementById('toastContainer').appendChild(div);
+      setTimeout(() => div.remove(), 4000);
+    }
+
+    // 엔터키로 로그인
+    document.getElementById('passwordInput').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+  </script>
+</body>
+</html>
+

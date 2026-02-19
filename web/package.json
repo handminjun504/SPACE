@@ -1,0 +1,14 @@
+{
+  "name": "spaceaxkey-contract-sync",
+  "version": "1.0.0",
+  "description": "스페이스액스키 계약 종료 - 정산 시트 자동 동기화",
+  "private": true,
+  "scripts": {
+    "dev": "vercel dev"
+  },
+  "dependencies": {
+    "googleapis": "^140.0.1",
+    "fuzzball": "^2.1.3"
+  }
+}
+
