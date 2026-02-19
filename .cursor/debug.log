@@ -1,3 +1,1 @@
-{"hypothesisId": "P", "location": "test:1. Auth", "message": "http_error", "data": {"code": 401, "elapsed": 0.82, "body": "{\"ok\": false, \"error\": \"비밀번호가 일치하지 않습니다.\"}"}, "timestamp": 1771476012845, "runId": "preview-direct-test"}
-{"hypothesisId": "P", "location": "test:2. Diagnose-full (GET)", "message": "success", "data": {"status": 200, "elapsed": 36.52, "size": 955, "data_keys": ["mode", "steps", "total_s", "py"], "summary": null, "server_elapsed": null}, "timestamp": 1771476049364, "runId": "preview-direct-test"}
-{"hypothesisId": "P", "location": "test:3. Preview (POST)", "message": "http_error", "data": {"code": 401, "elapsed": 0.72, "body": "{\"ok\": false, \"error\": \"인증 실패\"}"}, "timestamp": 1771476050084, "runId": "preview-direct-test"}
+﻿
