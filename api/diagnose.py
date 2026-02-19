@@ -93,7 +93,7 @@ class handler(BaseHTTPRequestHandler):
         if mode == "full" and term_url:
             # 데이터 품질 분석
             from _lib.matcher import (
-                normalize_text, normalize_name, normalize_date_str, get_col,
+                normalize_text, normalize_name, normalize_date_str, normalize_room, get_col,
                 _get_termination_dates, _prepare_termination,
                 extract_name,
             )
@@ -212,22 +212,24 @@ class handler(BaseHTTPRequestHandler):
                 exact = sum(1 for r in results if r.status.value == "정확매칭")
                 fuzzy = sum(1 for r in results if "유사" in r.status.value)
 
-                # 매칭 상세 분류
-                phase_counts = {"이름정확": 0, "날짜": 0, "퍼지": 0}
+                # 매칭 상세 분류 (v7 Phase별)
+                phase_counts = {"P1_호실+이름": 0, "P2_호실": 0, "P3_이름": 0, "P4_퍼지": 0}
                 for r in results:
                     if r.settlement_index is None:
                         continue
                     d = r.match_details
-                    if "날짜매칭" in d:
-                        phase_counts["날짜"] += 1
-                    elif "정확매칭" in d:
-                        phase_counts["이름정확"] += 1
+                    if d.startswith("P1:"):
+                        phase_counts["P1_호실+이름"] += 1
+                    elif d.startswith("P2:"):
+                        phase_counts["P2_호실"] += 1
+                    elif d.startswith("P3:"):
+                        phase_counts["P3_이름"] += 1
+                    elif d.startswith("P4:"):
+                        phase_counts["P4_퍼지"] += 1
                     else:
-                        phase_counts["퍼지"] += 1
+                        phase_counts["P4_퍼지"] += 1  # fallback
 
-                # 검증 거부 분석 (만기일/호실 불일치로 거부된 건)
-                rejected = [r for r in results if "검증 거부" in r.match_details or "검증거부" in r.match_details]
-                rejected_count = len(rejected)
+                rejected_count = 0  # v7에서는 hard reject 없음
 
                 # 거부 사유 샘플 (처음 10개)
                 rejected_samples = []
