@@ -55,7 +55,8 @@ class handler(BaseHTTPRequestHandler):
             sws = os.environ.get("SETTLEMENT_WORKSHEET_NAME", "기초데이터")
             try:
                 s_title, _, s_data = open_and_read(client, sid, sws)
-                steps.append({"step": "3_settlement", "ok": True, "title": s_title, "rows": len(s_data), "elapsed_s": elapsed()})
+                s_headers = list(s_data[0].keys()) if s_data else []
+                steps.append({"step": "3_settlement", "ok": True, "title": s_title, "rows": len(s_data), "headers": s_headers, "sample": {k: v for k, v in list(s_data[0].items())[:20]} if s_data else {}, "elapsed_s": elapsed()})
             except Exception as e:
                 import traceback
                 steps.append({"step": "3_settlement", "ok": False, "error": str(e), "tb": traceback.format_exc()[-300:], "elapsed_s": elapsed()})
@@ -66,7 +67,9 @@ class handler(BaseHTTPRequestHandler):
             try:
                 term_id = extract_sheet_id(term_url)
                 t_title, t_ws_list, t_data = open_and_read(client, term_id, term_ws)
-                steps.append({"step": "4_termination", "ok": True, "title": t_title, "ws_list": t_ws_list, "rows": len(t_data), "elapsed_s": elapsed()})
+                t_headers = list(t_data[0].keys()) if t_data else []
+                t_sample = {k: v for k, v in list(t_data[0].items())} if t_data else {}
+                steps.append({"step": "4_termination", "ok": True, "title": t_title, "ws_list": t_ws_list, "rows": len(t_data), "headers": t_headers, "sample": t_sample, "elapsed_s": elapsed()})
             except Exception as e:
                 import traceback
                 steps.append({"step": "4_termination", "ok": False, "error": str(e), "tb": traceback.format_exc()[-300:], "elapsed_s": elapsed()})
