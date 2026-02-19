@@ -1,14 +1,11 @@
 {
   "version": 2,
-  "builds": [
-    { "src": "api/auth.py", "use": "@vercel/python" },
-    { "src": "api/preview.py", "use": "@vercel/python" },
-    { "src": "api/sync.py", "use": "@vercel/python" }
-  ],
-  "routes": [
-    { "src": "/api/auth", "dest": "/api/auth.py" },
-    { "src": "/api/preview", "dest": "/api/preview.py" },
-    { "src": "/api/sync", "dest": "/api/sync.py" },
-    { "src": "/(.*)", "dest": "/public/$1" }
+  "functions": {
+    "api/auth.py": { "runtime": "@vercel/python@4.3.1" },
+    "api/preview.py": { "runtime": "@vercel/python@4.3.1", "maxDuration": 60 },
+    "api/sync.py": { "runtime": "@vercel/python@4.3.1", "maxDuration": 60 }
+  },
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/public/$1" }
   ]
 }
