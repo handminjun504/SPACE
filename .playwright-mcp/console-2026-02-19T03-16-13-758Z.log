@@ -1,0 +1,2 @@
+[    4306ms] [ERROR] Failed to load resource: the server responded with a status of 404 () @ https://space-ten-beta.vercel.app/favicon.ico:0
+[   18377ms] [ERROR] Failed to load resource: the server responded with a status of 401 () @ https://space-ten-beta.vercel.app/api/preview:0

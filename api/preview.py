@@ -61,16 +61,39 @@ class handler(BaseHTTPRequestHandler):
             # Google Sheets 연결
             client = get_gspread_client()
 
-            # 시트 제목 가져오기
-            settlement_title = get_sheet_title(client, settlement_id)
-            termination_title = get_sheet_title(client, termination_id)
+            # 정산 시트 접근 테스트
+            try:
+                settlement_title = get_sheet_title(client, settlement_id)
+            except Exception as e:
+                sa_email = json.loads(os.environ.get("GOOGLE_CREDENTIALS_JSON", "{}")).get("client_email", "???")
+                self._json(500, {"ok": False, "error": f"❌ 정산 시트 접근 실패!\n시트 ID: {settlement_id[:12]}...\n서비스 계정: {sa_email}\n오류: {type(e).__name__}: {str(e)}\n\n→ 정산 시트를 서비스 계정 이메일에 '편집자' 권한으로 공유해주세요."})
+                return
+
+            # 종료 시트 접근 테스트
+            try:
+                termination_title = get_sheet_title(client, termination_id)
+            except Exception as e:
+                sa_email = json.loads(os.environ.get("GOOGLE_CREDENTIALS_JSON", "{}")).get("client_email", "???")
+                self._json(500, {"ok": False, "error": f"❌ 종료 시트 접근 실패!\n시트 ID: {termination_id[:12]}...\n서비스 계정: {sa_email}\n오류: {type(e).__name__}: {str(e)}\n\n→ 종료 시트를 서비스 계정 이메일에 '뷰어' 이상 권한으로 공유해주세요."})
+                return
 
             # 워크시트 목록
             termination_worksheets = list_worksheets(client, termination_id)
 
-            # 데이터 읽기
-            settlement_df = read_sheet_as_dataframe(client, settlement_id, settlement_ws)
-            termination_df = read_sheet_as_dataframe(client, termination_id, ws_name)
+            # 정산 시트 데이터 읽기
+            try:
+                settlement_df = read_sheet_as_dataframe(client, settlement_id, settlement_ws)
+            except Exception as e:
+                self._json(500, {"ok": False, "error": f"❌ 정산 시트 '{settlement_ws}' 탭 읽기 실패: {type(e).__name__}: {str(e)}"})
+                return
+
+            # 종료 시트 데이터 읽기
+            try:
+                termination_df = read_sheet_as_dataframe(client, termination_id, ws_name)
+            except Exception as e:
+                available = ", ".join(termination_worksheets) if termination_worksheets else "(알 수 없음)"
+                self._json(500, {"ok": False, "error": f"❌ 종료 시트 '{ws_name}' 탭 읽기 실패: {type(e).__name__}: {str(e)}\n\n사용 가능한 탭 목록: {available}"})
+                return
 
             if termination_df.empty:
                 self._json(400, {"ok": False, "error": f"종료 시트 '{ws_name}' 탭에 데이터가 없습니다."})
