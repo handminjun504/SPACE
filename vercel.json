@@ -3,6 +3,7 @@
   "functions": {
     "api/auth.py": { "maxDuration": 30 },
     "api/health.py": { "maxDuration": 30 },
+    "api/diagnose.py": { "maxDuration": 60 },
     "api/preview.py": { "maxDuration": 60 },
     "api/sync.py": { "maxDuration": 60 }
   }
