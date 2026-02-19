@@ -1,11 +1,12 @@
 """
-매칭 엔진 모듈 (Vercel 서버리스용)
+매칭 엔진 모듈 (Vercel 서버리스용) — 속도 최적화 버전
 
 정산 시트와 계약 종료 시트 간 데이터를 매칭합니다.
-1차 정확 매칭 → 퍼지 매칭 → 교차 검증
+1차 정확 매칭 (인덱스 기반 O(1)) → 퍼지 매칭 → 교차 검증
 """
 
 import re
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -140,6 +141,26 @@ def extract_name(row: dict, name_col: str, fallback_cols: list[str]) -> str:
 
 
 # ============================================================
+# 인덱스 빌더 (속도 최적화)
+# ============================================================
+
+def _build_settlement_index(s_df: pd.DataFrame) -> dict:
+    """
+    정산 시트를 미리 인덱싱하여 O(1) 룩업이 가능하게 합니다.
+    key: (normalized_branch, normalized_name) → [(s_idx, s_dict, norm_room)]
+    """
+    index = defaultdict(list)
+    for s_idx, s_row in s_df.iterrows():
+        s_dict = s_row.to_dict()
+        s_branch = normalize_text(get_col(s_dict, "지점명"))
+        s_name_raw = extract_name(s_dict, "계약자명", NAME_FALLBACK_COLUMNS_SETTLEMENT)
+        s_name = normalize_name(s_name_raw)
+        s_room = normalize_text(get_col(s_dict, "호실"))
+        index[(s_branch, s_name)].append((s_idx, s_dict, s_room, s_name_raw))
+    return index
+
+
+# ============================================================
 # 매칭 엔진
 # ============================================================
 
@@ -152,12 +173,24 @@ def run_matching(
     results = []
     matched_indices: set[int] = set()
 
+    # 정산 시트 사전 인덱싱 (속도 최적화 핵심)
+    s_index = _build_settlement_index(settlement_df)
+
+    # 퍼지 매칭용 리스트 (사전에 준비)
+    s_rows_for_fuzzy = []
+    for s_idx, s_row in settlement_df.iterrows():
+        s_dict = s_row.to_dict()
+        s_branch = get_col(s_dict, "지점명")
+        s_name_raw = extract_name(s_dict, "계약자명", NAME_FALLBACK_COLUMNS_SETTLEMENT)
+        s_room = get_col(s_dict, "호실")
+        s_rows_for_fuzzy.append((s_idx, s_dict, s_branch, s_name_raw, s_room))
+
     for t_idx, t_row in termination_df.iterrows():
         t_dict = t_row.to_dict()
 
-        result = _exact_match(t_idx, t_dict, settlement_df, matched_indices)
+        result = _exact_match_indexed(t_idx, t_dict, s_index, matched_indices)
         if result is None:
-            result = _fuzzy_match(t_idx, t_dict, settlement_df, matched_indices, threshold)
+            result = _fuzzy_match_fast(t_idx, t_dict, s_rows_for_fuzzy, matched_indices, threshold)
         if result is None:
             result = MatchResult(
                 termination_index=t_idx,
@@ -177,7 +210,8 @@ def run_matching(
     return results
 
 
-def _exact_match(t_idx, t_row, s_df, matched) -> Optional[MatchResult]:
+def _exact_match_indexed(t_idx, t_row, s_index, matched) -> Optional[MatchResult]:
+    """인덱스 기반 O(1) 정확 매칭"""
     t_branch = normalize_text(get_col(t_row, "지점명"))
     t_room = normalize_text(get_col(t_row, "호실"))
     t_name_raw = extract_name(t_row, "계약자명", NAME_FALLBACK_COLUMNS_TERMINATION)
@@ -188,36 +222,39 @@ def _exact_match(t_idx, t_row, s_df, matched) -> Optional[MatchResult]:
 
     original = get_col(t_row, "계약자명")
     used_fb = (not original.strip()) and t_name_raw.strip()
+    fb_note = " (주민번호칸 이름)" if used_fb else ""
 
-    for s_idx, s_row in s_df.iterrows():
+    # (branch, name) 키로 O(1) 룩업
+    candidates = s_index.get((t_branch, t_name), [])
+    for s_idx, s_dict, s_room, s_name_raw in candidates:
         if s_idx in matched:
             continue
-        s_dict = s_row.to_dict()
-        s_branch = normalize_text(get_col(s_dict, "지점명"))
-        s_name_raw = extract_name(s_dict, "계약자명", NAME_FALLBACK_COLUMNS_SETTLEMENT)
-        s_name = normalize_name(s_name_raw)
-        s_room = normalize_text(get_col(s_dict, "호실"))
-
-        fb_note = " (주민번호칸 이름)" if used_fb else ""
-
-        if t_branch == s_branch and t_name == s_name and t_room == s_room:
+        # 호실까지 일치
+        if t_room == s_room:
             return MatchResult(
                 termination_index=t_idx, settlement_index=s_idx,
                 status=MatchStatus.EXACT, confidence=100.0,
                 match_details=f"정확매칭: {t_branch}/{t_name_raw}{fb_note}/{t_room}",
                 termination_row=t_row, settlement_row=s_dict,
             )
-        if t_branch == s_branch and t_name == s_name and (not t_room or not s_room):
+
+    # 호실 비어있는 경우에도 매칭 시도
+    for s_idx, s_dict, s_room, s_name_raw in candidates:
+        if s_idx in matched:
+            continue
+        if not t_room or not s_room:
             return MatchResult(
                 termination_index=t_idx, settlement_index=s_idx,
                 status=MatchStatus.EXACT, confidence=90.0,
                 match_details=f"정확매칭(호실미확인): {t_branch}/{t_name_raw}{fb_note}",
                 termination_row=t_row, settlement_row=s_dict,
             )
+
     return None
 
 
-def _fuzzy_match(t_idx, t_row, s_df, matched, threshold) -> Optional[MatchResult]:
+def _fuzzy_match_fast(t_idx, t_row, s_rows, matched, threshold) -> Optional[MatchResult]:
+    """사전 준비된 리스트로 퍼지 매칭"""
     t_branch = get_col(t_row, "지점명")
     t_name_raw = extract_name(t_row, "계약자명", NAME_FALLBACK_COLUMNS_TERMINATION)
     t_room = get_col(t_row, "호실")
@@ -228,20 +265,27 @@ def _fuzzy_match(t_idx, t_row, s_df, matched, threshold) -> Optional[MatchResult
     original = get_col(t_row, "계약자명")
     used_fb = (not original.strip()) and t_name_raw.strip()
 
+    t_branch_norm = normalize_text(t_branch)
+    t_name_norm = normalize_name(t_name_raw)
+    t_room_norm = normalize_text(t_room)
+
     best_score, best_idx, best_row, best_detail = 0.0, None, None, ""
 
-    for s_idx, s_row in s_df.iterrows():
+    for s_idx, s_dict, s_branch, s_name_raw, s_room in s_rows:
         if s_idx in matched:
             continue
-        s_dict = s_row.to_dict()
-        s_branch = get_col(s_dict, "지점명")
-        s_name_raw = extract_name(s_dict, "계약자명", NAME_FALLBACK_COLUMNS_SETTLEMENT)
-        s_room = get_col(s_dict, "호실")
 
-        br = fuzz.ratio(normalize_text(t_branch), normalize_text(s_branch)) if t_branch.strip() and s_branch.strip() else 0
-        tn, sn = normalize_name(t_name_raw), normalize_name(s_name_raw)
-        cn = max(fuzz.ratio(tn, sn), fuzz.token_sort_ratio(tn, sn)) if tn and sn else 0
-        rm = fuzz.ratio(normalize_text(t_room), normalize_text(s_room)) if t_room.strip() and s_room.strip() else 100
+        s_branch_norm = normalize_text(s_branch)
+        s_name_norm = normalize_name(s_name_raw)
+        s_room_norm = normalize_text(s_room)
+
+        # 지점명이 완전히 다르면 스킵 (최적화)
+        br = fuzz.ratio(t_branch_norm, s_branch_norm) if t_branch_norm and s_branch_norm else 0
+        if br < 50:
+            continue
+
+        cn = max(fuzz.ratio(t_name_norm, s_name_norm), fuzz.token_sort_ratio(t_name_norm, s_name_norm)) if t_name_norm and s_name_norm else 0
+        rm = fuzz.ratio(t_room_norm, s_room_norm) if t_room_norm and s_room_norm else 100
 
         total = br * 0.3 + cn * 0.5 + rm * 0.2
         if total > best_score:
@@ -330,4 +374,3 @@ def summary(results: list[MatchResult]) -> dict:
         "fuzzy": fuzzy_,
         "unmatched": unmatched,
     }
-

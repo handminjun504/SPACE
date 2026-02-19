@@ -9,6 +9,7 @@ Response: { "ok": true, "summary": {...}, "results": [...], "settlement_title": 
 import json
 import os
 import sys
+import time
 from http.server import BaseHTTPRequestHandler
 
 # Vercel 런타임에서 _lib 모듈을 찾을 수 있도록 경로 추가
@@ -28,6 +29,7 @@ from _lib.matcher import run_matching, results_to_json, summary
 
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
+        t0 = time.time()
         try:
             # 비밀번호 확인
             pw = self.headers.get("X-Password", "")
@@ -58,8 +60,11 @@ class handler(BaseHTTPRequestHandler):
                 self._json(400, {"ok": False, "error": str(e)})
                 return
 
+            print(f"[PREVIEW] 시작 ({time.time()-t0:.1f}s)")
+
             # Google Sheets 연결
             client = get_gspread_client()
+            print(f"[PREVIEW] 클라이언트 생성 ({time.time()-t0:.1f}s)")
 
             # 정산 시트 접근 테스트
             try:
@@ -68,6 +73,7 @@ class handler(BaseHTTPRequestHandler):
                 sa_email = json.loads(os.environ.get("GOOGLE_CREDENTIALS_JSON", "{}")).get("client_email", "???")
                 self._json(500, {"ok": False, "error": f"❌ 정산 시트 접근 실패!\n시트 ID: {settlement_id[:12]}...\n서비스 계정: {sa_email}\n오류: {type(e).__name__}: {str(e)}\n\n→ 정산 시트를 서비스 계정 이메일에 '편집자' 권한으로 공유해주세요."})
                 return
+            print(f"[PREVIEW] 정산 시트 제목: {settlement_title} ({time.time()-t0:.1f}s)")
 
             # 종료 시트 접근 테스트
             try:
@@ -79,6 +85,7 @@ class handler(BaseHTTPRequestHandler):
 
             # 워크시트 목록
             termination_worksheets = list_worksheets(client, termination_id)
+            print(f"[PREVIEW] 종료 시트 제목: {termination_title} ({time.time()-t0:.1f}s)")
 
             # 정산 시트 데이터 읽기
             try:
@@ -86,6 +93,7 @@ class handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._json(500, {"ok": False, "error": f"❌ 정산 시트 '{settlement_ws}' 탭 읽기 실패: {type(e).__name__}: {str(e)}"})
                 return
+            print(f"[PREVIEW] 정산 시트 로드: {len(settlement_df)}행 ({time.time()-t0:.1f}s)")
 
             # 종료 시트 데이터 읽기
             try:
@@ -94,6 +102,7 @@ class handler(BaseHTTPRequestHandler):
                 available = ", ".join(termination_worksheets) if termination_worksheets else "(알 수 없음)"
                 self._json(500, {"ok": False, "error": f"❌ 종료 시트 '{ws_name}' 탭 읽기 실패: {type(e).__name__}: {str(e)}\n\n사용 가능한 탭 목록: {available}"})
                 return
+            print(f"[PREVIEW] 종료 시트 로드: {len(termination_df)}행 ({time.time()-t0:.1f}s)")
 
             if termination_df.empty:
                 self._json(400, {"ok": False, "error": f"종료 시트 '{ws_name}' 탭에 데이터가 없습니다."})
@@ -103,6 +112,7 @@ class handler(BaseHTTPRequestHandler):
             results = run_matching(settlement_df, termination_df)
             results_json = results_to_json(results)
             summary_data = summary(results)
+            print(f"[PREVIEW] 매칭 완료: {summary_data} ({time.time()-t0:.1f}s)")
 
             self._json(200, {
                 "ok": True,
@@ -113,6 +123,7 @@ class handler(BaseHTTPRequestHandler):
                 "termination_count": len(termination_df),
                 "summary": summary_data,
                 "results": results_json,
+                "elapsed_seconds": round(time.time() - t0, 1),
             })
 
         except Exception as e:
@@ -136,4 +147,3 @@ class handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Password")
         self.end_headers()
-

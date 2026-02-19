@@ -1,9 +1,9 @@
 {
   "version": 2,
   "functions": {
-    "api/auth.py": { "runtime": "@vercel/python@4.3.1" },
-    "api/health.py": { "runtime": "@vercel/python@4.3.1" },
-    "api/preview.py": { "runtime": "@vercel/python@4.3.1", "maxDuration": 60 },
-    "api/sync.py": { "runtime": "@vercel/python@4.3.1", "maxDuration": 60 }
+    "api/auth.py": { "maxDuration": 30 },
+    "api/health.py": { "maxDuration": 30 },
+    "api/preview.py": { "maxDuration": 60 },
+    "api/sync.py": { "maxDuration": 60 }
   }
 }
