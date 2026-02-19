@@ -49,8 +49,11 @@ class handler(BaseHTTPRequestHandler):
             steps.append({"step": "2_client", "ok": False, "error": str(e), "elapsed_s": elapsed()})
             return self._respond(steps, t0, mode)
 
+        s_data = None
+        t_data = None
+
         # mode=settlement (기본): 정산 시트만
-        if mode in ("settlement", "full"):
+        if mode in ("settlement", "full", "name_debug"):
             sid = os.environ.get("SETTLEMENT_SHEET_ID", "")
             sws = os.environ.get("SETTLEMENT_WORKSHEET_NAME", "기초데이터")
             try:
@@ -63,7 +66,7 @@ class handler(BaseHTTPRequestHandler):
                 return self._respond(steps, t0, mode)
 
         # mode=termination: 종료 시트만
-        if mode in ("termination", "full") and term_url:
+        if mode in ("termination", "full", "name_debug") and term_url:
             try:
                 term_id = extract_sheet_id(term_url)
                 t_title, t_ws_list, t_data = open_and_read(client, term_id, term_ws)
@@ -276,6 +279,78 @@ class handler(BaseHTTPRequestHandler):
             except Exception as e:
                 import traceback
                 steps.append({"step": "6_serialize", "ok": False, "error": str(e), "tb": traceback.format_exc()[-300:], "elapsed_s": elapsed()})
+
+        # === 이름 매칭 디버깅 (mode=name_debug) ===
+        if mode == "name_debug" and s_data and t_data:
+            from _lib.matcher import normalize_text, normalize_name, normalize_room, get_col, extract_name
+            from collections import Counter
+
+            target_branch = qs.get("branch", [""])[0]
+
+            # 지점별 정산/종료 이름 수집
+            s_names_by_branch = {}
+            for r in s_data:
+                bn = normalize_text(get_col(r, "지점명"))
+                if not bn:
+                    continue
+                name = normalize_name(get_col(r, "계약자명"))
+                room = normalize_room(get_col(r, "호실"))
+                if bn not in s_names_by_branch:
+                    s_names_by_branch[bn] = []
+                s_names_by_branch[bn].append({"name": name, "room": room, "raw_name": get_col(r, "계약자명")[:20], "raw_room": get_col(r, "호실")[:10]})
+
+            t_names_by_branch = {}
+            for r in t_data:
+                bn = normalize_text(get_col(r, "지점명"))
+                if not bn:
+                    continue
+                name = normalize_name(extract_name(r, "계약자명", ["주민 번호", "상호"]))
+                room = normalize_room(get_col(r, "호실"))
+                if bn not in t_names_by_branch:
+                    t_names_by_branch[bn] = []
+                t_names_by_branch[bn].append({"name": name, "room": room, "raw_name": extract_name(r, "계약자명", ["주민 번호", "상호"])[:20], "raw_room": get_col(r, "호실")[:10]})
+
+            # 지점별 이름 교집합 분석
+            branch_analysis = []
+            for bn in sorted(set(s_names_by_branch.keys()) & set(t_names_by_branch.keys())):
+                s_name_set = set(e["name"] for e in s_names_by_branch[bn] if e["name"])
+                t_name_set = set(e["name"] for e in t_names_by_branch[bn] if e["name"])
+                overlap = s_name_set & t_name_set
+
+                # Room overlap
+                s_room_set = set(e["room"] for e in s_names_by_branch[bn] if e["room"])
+                t_room_set = set(e["room"] for e in t_names_by_branch[bn] if e["room"])
+                room_overlap = s_room_set & t_room_set
+
+                entry = {
+                    "branch": bn[:30],
+                    "s_names": len(s_name_set),
+                    "t_names": len(t_name_set),
+                    "name_overlap": len(overlap),
+                    "s_rooms": len(s_room_set),
+                    "t_rooms": len(t_room_set),
+                    "room_overlap": len(room_overlap),
+                }
+
+                # Show sample overlapping and non-overlapping names
+                if target_branch and normalize_text(target_branch) == bn:
+                    entry["overlap_names_sample"] = sorted(list(overlap))[:20]
+                    t_only = t_name_set - s_name_set
+                    entry["t_only_names_sample"] = sorted(list(t_only))[:20]
+                    s_only = s_name_set - t_name_set
+                    entry["s_only_names_sample"] = sorted(list(s_only))[:20]
+                    # Also show raw samples
+                    entry["t_raw_samples"] = [{"name": e["raw_name"], "room": e["raw_room"]} for e in t_names_by_branch[bn][:10]]
+                    entry["s_raw_samples"] = [{"name": e["raw_name"], "room": e["raw_room"]} for e in s_names_by_branch[bn][:10]]
+
+                branch_analysis.append(entry)
+
+            steps.append({
+                "step": "name_debug", "ok": True,
+                "branch_count": len(branch_analysis),
+                "branches": branch_analysis,
+                "elapsed_s": elapsed(),
+            })
 
         self._respond(steps, t0, mode)
 
