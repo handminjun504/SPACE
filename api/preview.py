@@ -4,7 +4,7 @@ GET  /api/preview - 버전 및 상태 확인
 """
 
 # region agent log
-_PREVIEW_VERSION = "v4-fast"
+_PREVIEW_VERSION = "v5.3-strict"
 import time as _time
 _t_module_start = _time.time()
 # endregion

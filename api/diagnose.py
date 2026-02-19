@@ -219,26 +219,48 @@ class handler(BaseHTTPRequestHandler):
                     else:
                         phase_counts["퍼지"] += 1
 
+                # 검증 거부 분석 (만기일/호실 불일치로 거부된 건)
+                rejected = [r for r in results if "검증 거부" in r.match_details or "검증거부" in r.match_details]
+                rejected_count = len(rejected)
+
+                # 거부 사유 샘플 (처음 10개)
+                rejected_samples = []
+                for r in rejected[:10]:
+                    rejected_samples.append({
+                        "t_idx": r.termination_index,
+                        "t_name": extract_name(r.termination_row, "계약자명", ["주민 번호", "상호"])[:15],
+                        "t_branch": get_col(r.termination_row, "지점명")[:20],
+                        "t_room": get_col(r.termination_row, "호실")[:10],
+                        "details": r.match_details[:150],
+                    })
+
                 # 매칭된 결과 샘플 (처음 5개)
                 match_samples = []
                 for r in results:
                     if r.settlement_index is not None and len(match_samples) < 5:
+                        t_start_corr, t_end_corr = _get_termination_dates(r.termination_row)
                         match_samples.append({
                             "t_idx": r.termination_index,
                             "s_idx": r.settlement_index,
                             "confidence": r.confidence,
-                            "details": r.match_details[:120],
+                            "details": r.match_details[:150],
                             "t_name": extract_name(r.termination_row, "계약자명", ["주민 번호", "상호"]),
                             "s_name": get_col(r.settlement_row, "계약자명"),
                             "t_branch": get_col(r.termination_row, "지점명")[:20],
+                            "t_room": get_col(r.termination_row, "호실")[:10],
+                            "s_room": get_col(r.settlement_row, "호실")[:10],
+                            "t_expiry": t_end_corr,
+                            "s_end_date": get_col(r.settlement_row, "계약종료일자")[:12],
                         })
 
                 steps.append({
                     "step": "5_matching", "ok": True,
                     "total": len(results), "matched": matched,
                     "exact": exact, "fuzzy": fuzzy,
+                    "rejected_by_verify": rejected_count,
                     "phases": phase_counts,
                     "match_samples": match_samples,
+                    "rejected_samples": rejected_samples,
                     "elapsed_s": elapsed(),
                 })
             except Exception as e:

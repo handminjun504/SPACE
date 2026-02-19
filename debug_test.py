@@ -72,10 +72,18 @@ def test_full():
                 if "matched" in s: extras.append(f"matched={s['matched']}")
                 if "exact" in s: extras.append(f"exact={s['exact']}")
                 if "fuzzy" in s: extras.append(f"fuzzy={s['fuzzy']}")
+                if "rejected_by_verify" in s: extras.append(f"검증거부={s['rejected_by_verify']}")
                 if "phases" in s: extras.append(f"phases={s['phases']}")
                 if "match_samples" in s:
                     for ms in s["match_samples"]:
-                        safe_print(f"    sample: t[{ms.get('t_idx')}]={ms.get('t_name','?')[:12]} ↔ s[{ms.get('s_idx')}]={ms.get('s_name','?')[:12]} | {ms.get('details','')[:80]}")
+                        room_info = f"호실: t={ms.get('t_room','-')}/s={ms.get('s_room','-')}" if ms.get('t_room') or ms.get('s_room') else ""
+                        date_info = f"만기: t={ms.get('t_expiry','-')}/s={ms.get('s_end_date','-')}" if ms.get('t_expiry') or ms.get('s_end_date') else ""
+                        safe_print(f"    ✓ t[{ms.get('t_idx')}]={ms.get('t_name','?')[:12]} ↔ s[{ms.get('s_idx')}]={ms.get('s_name','?')[:12]} | {room_info} | {date_info}")
+                        safe_print(f"      {ms.get('details','')[:120]}")
+                if "rejected_samples" in s and s["rejected_samples"]:
+                    safe_print(f"    [검증 거부 샘플 (만기일/호실 불일치)]")
+                    for rs in s["rejected_samples"]:
+                        safe_print(f"    ✗ t[{rs.get('t_idx')}]={rs.get('t_branch','')[:15]}/{rs.get('t_name','')[:10]}/{rs.get('t_room','')} → {rs.get('details','')[:120]}")
                 if "changes" in s: extras.append(f"changes={s['changes']}")
                 if "resp_bytes" in s: extras.append(f"size={s['resp_bytes']}B")
                 # 4b_data_quality: 행 상태 분석
@@ -125,7 +133,7 @@ def test_full():
 
 def main():
     safe_print("=" * 60)
-    safe_print("v5 Date-Based Matching Verification")
+    safe_print("v5.3 Cross-Verify Strict Mode")
     safe_print("=" * 60)
 
     v = test_version()
