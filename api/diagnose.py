@@ -332,16 +332,14 @@ class handler(BaseHTTPRequestHandler):
                     "room_overlap": len(room_overlap),
                 }
 
-                # Show sample overlapping and non-overlapping names
-                if target_branch and (normalize_text(target_branch) in bn or bn in normalize_text(target_branch)):
-                    entry["overlap_names_sample"] = sorted(list(overlap))[:20]
-                    t_only = t_name_set - s_name_set
-                    entry["t_only_names_sample"] = sorted(list(t_only))[:20]
-                    s_only = s_name_set - t_name_set
-                    entry["s_only_names_sample"] = sorted(list(s_only))[:20]
-                    # Also show raw samples
-                    entry["t_raw_samples"] = [{"name": e["raw_name"], "room": e["raw_room"]} for e in t_names_by_branch[bn][:10]]
-                    entry["s_raw_samples"] = [{"name": e["raw_name"], "room": e["raw_room"]} for e in s_names_by_branch[bn][:10]]
+                # 모든 지점의 처음 5개 이름 샘플 표시
+                entry["t_name_samples"] = sorted(list(t_name_set))[:5]
+                entry["s_name_samples"] = sorted(list(s_name_set))[:5]
+                entry["t_raw_samples"] = [e["raw_name"] for e in t_names_by_branch[bn][:5]]
+                entry["s_raw_samples"] = [e["raw_name"] for e in s_names_by_branch[bn][:5]]
+                
+                if overlap:
+                    entry["overlap_names"] = sorted(list(overlap))[:10]
 
                 branch_analysis.append(entry)
 
