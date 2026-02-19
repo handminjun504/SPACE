@@ -64,9 +64,32 @@ def read_sheet_as_records(
     Returns:
         [{"컬럼명": "값", ...}, ...]
     """
-    spreadsheet = client.open_by_key(sheet_id)
-    worksheet = spreadsheet.worksheet(worksheet_name)
-    return worksheet.get_all_records()
+    try:
+        spreadsheet = client.open_by_key(sheet_id)
+    except Exception as e:
+        raise PermissionError(
+            f"시트(ID: {sheet_id[:12]}...) 열기 실패. "
+            f"서비스 계정에 시트 공유가 필요합니다. "
+            f"원본 에러: {type(e).__name__}: {str(e)}"
+        ) from e
+
+    try:
+        worksheet = spreadsheet.worksheet(worksheet_name)
+    except gspread.exceptions.WorksheetNotFound:
+        available = [ws.title for ws in spreadsheet.worksheets()]
+        raise ValueError(
+            f"'{worksheet_name}' 탭을 찾을 수 없습니다. "
+            f"사용 가능한 탭: {', '.join(available)}"
+        )
+
+    try:
+        return worksheet.get_all_records()
+    except Exception as e:
+        raise PermissionError(
+            f"시트 데이터 읽기 실패. "
+            f"Google Sheets API가 활성화되어 있는지 확인하세요. "
+            f"원본 에러: {type(e).__name__}: {str(e)} | args: {e.args}"
+        ) from e
 
 
 def read_sheet_as_dataframe(
@@ -176,12 +199,9 @@ def highlight_rows(
 
 
 def get_sheet_title(client: gspread.Client, sheet_id: str) -> str:
-    """시트 제목을 가져옵니다."""
-    try:
-        spreadsheet = client.open_by_key(sheet_id)
-        return spreadsheet.title
-    except Exception:
-        return "(제목 확인 불가)"
+    """시트 제목을 가져옵니다. 에러 시 그대로 raise."""
+    spreadsheet = client.open_by_key(sheet_id)
+    return spreadsheet.title
 
 
 def list_worksheets(client: gspread.Client, sheet_id: str) -> list[str]:
