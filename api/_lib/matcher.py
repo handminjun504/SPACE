@@ -158,6 +158,59 @@ def normalize_date_str(date_str) -> str:
     return ""
 
 
+def _get_next_column_value(row: dict, col_name: str) -> str:
+    """주어진 컬럼명의 바로 다음 컬럼 값을 반환 (열 밀림 보정용)"""
+    keys = list(row.keys())
+    norm = col_name.replace(" ", "").replace("\n", "").strip()
+    target_idx = -1
+    for i, key in enumerate(keys):
+        if key == col_name or str(key).replace(" ", "").replace("\n", "").strip() == norm:
+            target_idx = i
+            break
+    if target_idx >= 0 and target_idx + 1 < len(keys):
+        val = row[keys[target_idx + 1]]
+        return str(val) if val is not None else ""
+    return ""
+
+
+def _get_termination_dates(row: dict) -> tuple[str, str]:
+    """
+    종료 시트에서 계약 시작/만기 날짜를 추출.
+    열 밀림 보정 포함:
+      정상: S열=시작날짜, T열=만기날짜
+      밀림: S열=쓰레기, T열=시작날짜, U열=만기날짜
+    """
+    raw_start = get_col(row, COL_TERMINATION_START_DATE)  # S열
+    raw_end = get_col(row, COL_TERMINATION_END_DATE)      # T열
+
+    start_parsed = normalize_date_str(raw_start)
+    end_parsed = normalize_date_str(raw_end)
+
+    # 케이스 1: 둘 다 유효한 날짜 → 정상
+    if start_parsed and end_parsed:
+        return start_parsed, end_parsed
+
+    # 케이스 2: S열 날짜X, T열 날짜O → 밀림 의심 → U열 확인
+    if not start_parsed and end_parsed:
+        next_col_val = _get_next_column_value(row, COL_TERMINATION_END_DATE)  # U열
+        next_parsed = normalize_date_str(next_col_val)
+        if next_parsed:
+            # 밀림 확인됨: T=시작, U=만기
+            # 추가 검증: 시작일 < 만기일
+            if end_parsed <= next_parsed:
+                return end_parsed, next_parsed
+            # 시작 > 만기면 밀림이 아닐 수 있음, 원래대로
+        # U열에 날짜가 없으면 T열을 만기일로 간주 (시작일 없음)
+        return "", end_parsed
+
+    # 케이스 3: S열 날짜O, T열 날짜X → S만 시작일 (이상한 경우)
+    if start_parsed and not end_parsed:
+        return start_parsed, ""
+
+    # 케이스 4: 둘 다 없음 → 빈 값
+    return "", ""
+
+
 def get_col(row: dict, col_name: str) -> str:
     if col_name in row:
         return str(row[col_name]) if row[col_name] is not None else ""
@@ -231,21 +284,48 @@ def _prepare_settlement(data: list[dict]) -> tuple[
     return exact_index, branch_index, date_index, end_date_index
 
 
-def _prepare_termination(data: list[dict]) -> list[PreparedRow]:
+def _prepare_termination(data: list[dict]) -> tuple[list[PreparedRow], dict]:
+    """종료 데이터 전처리. 열 밀림 보정 포함.
+    Returns: (prepared_rows, stats) — stats에 밀림 건수 등 포함
+    """
     result = []
+    shift_count = 0  # 밀림 보정된 행 수
+    normal_date_count = 0  # 정상 날짜 행 수
+    no_date_count = 0  # 날짜 없음
+
     for idx, row in enumerate(data):
+        start_date, end_date = _get_termination_dates(row)
+
+        # 밀림 감지 통계
+        raw_start = normalize_date_str(get_col(row, COL_TERMINATION_START_DATE))
+        raw_end = normalize_date_str(get_col(row, COL_TERMINATION_END_DATE))
+        if not raw_start and raw_end and start_date == raw_end:
+            # 밀림 보정됨: T→시작, U→만기
+            shift_count += 1
+        elif raw_start or raw_end:
+            normal_date_count += 1
+        else:
+            no_date_count += 1
+
         pr = PreparedRow(
             idx=idx, row=row,
             branch_norm=normalize_text(get_col(row, COL_TERMINATION_BRANCH)),
             name_raw=extract_name(row, COL_TERMINATION_NAME, NAME_FALLBACK_COLUMNS_TERMINATION),
             name_norm="",
             room_norm=normalize_text(get_col(row, COL_TERMINATION_ROOM)),
-            start_date=normalize_date_str(get_col(row, COL_TERMINATION_START_DATE)),
-            end_date=normalize_date_str(get_col(row, COL_TERMINATION_END_DATE)),
+            start_date=start_date,
+            end_date=end_date,
         )
         pr.name_norm = normalize_name(pr.name_raw)
         result.append(pr)
-    return result
+
+    stats = {
+        "total": len(data),
+        "date_shift_corrected": shift_count,
+        "normal_dates": normal_date_count,
+        "no_dates": no_date_count,
+    }
+    return result, stats
 
 
 # ============================================================
@@ -274,8 +354,13 @@ def run_matching(
     t0 = time.time()
 
     exact_index, branch_index, date_index, end_date_index = _prepare_settlement(settlement_data)
-    t_prepared = _prepare_termination(termination_data)
+    t_prepared, t_stats = _prepare_termination(termination_data)
     fuzzy_idx = _build_fuzzy_index(branch_index)
+
+    print(f"[MATCHER v5.2] 종료시트 날짜 통계: "
+          f"밀림보정={t_stats['date_shift_corrected']}, "
+          f"정상날짜={t_stats['normal_dates']}, "
+          f"날짜없음={t_stats['no_dates']}")
 
     results = []
     matched_indices: set[int] = set()
