@@ -53,16 +53,31 @@ def extract_sheet_id(url_or_id: str) -> str:
     raise ValueError(f"유효한 구글 시트 URL/ID가 아닙니다: {url_or_id}")
 
 
-def read_sheet_as_records(
+def _make_unique_headers(headers: list[str]) -> list[str]:
+    """중복 헤더를 고유하게 만듭니다. 예: ['호실', '호실'] → ['호실', '호실_2']"""
+    seen = {}
+    result = []
+    for h in headers:
+        h = str(h).strip()
+        if not h:
+            h = "unnamed"
+        if h in seen:
+            seen[h] += 1
+            result.append(f"{h}_{seen[h]}")
+        else:
+            seen[h] = 1
+            result.append(h)
+    return result
+
+
+def read_sheet_as_dataframe(
     client: gspread.Client,
     sheet_id: str,
     worksheet_name: str = "Sheet1",
-) -> list[dict]:
+) -> pd.DataFrame:
     """
-    구글 시트를 딕셔너리 리스트로 읽어옵니다.
-
-    Returns:
-        [{"컬럼명": "값", ...}, ...]
+    구글 시트를 DataFrame으로 읽어옵니다.
+    헤더 중복이 있어도 안전하게 처리합니다.
     """
     try:
         spreadsheet = client.open_by_key(sheet_id)
@@ -82,24 +97,15 @@ def read_sheet_as_records(
             f"사용 가능한 탭: {', '.join(available)}"
         )
 
-    try:
-        return worksheet.get_all_records()
-    except Exception as e:
-        raise PermissionError(
-            f"시트 데이터 읽기 실패. "
-            f"Google Sheets API가 활성화되어 있는지 확인하세요. "
-            f"원본 에러: {type(e).__name__}: {str(e)} | args: {e.args}"
-        ) from e
+    # get_all_values()는 헤더 중복 문제 없이 모든 셀 값을 가져옴
+    all_values = worksheet.get_all_values()
+    if not all_values or len(all_values) < 2:
+        return pd.DataFrame()
 
+    headers = _make_unique_headers(all_values[0])
+    data = all_values[1:]
 
-def read_sheet_as_dataframe(
-    client: gspread.Client,
-    sheet_id: str,
-    worksheet_name: str = "Sheet1",
-) -> pd.DataFrame:
-    """구글 시트를 DataFrame으로 읽어옵니다."""
-    records = read_sheet_as_records(client, sheet_id, worksheet_name)
-    return pd.DataFrame(records)
+    return pd.DataFrame(data, columns=headers)
 
 
 def get_worksheet(
