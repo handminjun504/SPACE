@@ -78,25 +78,29 @@ def test_full():
                         safe_print(f"    sample: t[{ms.get('t_idx')}]={ms.get('t_name','?')[:12]} ↔ s[{ms.get('s_idx')}]={ms.get('s_name','?')[:12]} | {ms.get('details','')[:80]}")
                 if "changes" in s: extras.append(f"changes={s['changes']}")
                 if "resp_bytes" in s: extras.append(f"size={s['resp_bytes']}B")
-                if "common_branches" in s: extras.append(f"branches_overlap={s['common_branches']}/{s['t_branches']}")
-                if "branch_overlap_pct" in s: extras.append(f"({s['branch_overlap_pct']}%)")
-                if "s_has_start_date" in s: extras.append(f"s_dates={s['s_has_start_date']}/{s['s_has_end_date']}")
-                # 밀림 보정 전/후 비교
-                if "t_raw_start_date" in s:
-                    safe_print(f"    [날짜 밀림 보정]")
-                    safe_print(f"      보정 전: 시작={s['t_raw_start_date']}, 만기={s['t_raw_end_date']}")
-                    safe_print(f"      보정 후: 시작={s.get('t_corrected_start_date','?')}, 만기={s.get('t_corrected_end_date','?')}")
-                    safe_print(f"      밀림 보정 건수: {s.get('t_date_shift_corrected', 0)}")
-                if "shift_samples" in s and s["shift_samples"]:
-                    safe_print(f"      밀림 샘플:")
-                    for ss in s["shift_samples"]:
-                        safe_print(f"        {ss.get('row_name','?')}: S='{ss.get('S_raw','')}'  T='{ss.get('T_raw','')}' → 시작={ss.get('corrected_start','')}, 만기={ss.get('corrected_end','')}")
-                if "t_headers" in s:
-                    safe_print(f"    종료시트 헤더: {s['t_headers']}")
-                if "sample_common_branches" in s:
-                    safe_print(f"    common branches: {s['sample_common_branches']}")
-                if "sample_t_only" in s and s['sample_t_only']:
-                    safe_print(f"    termination only: {s['sample_t_only']}")
+                # 4b_data_quality: 행 상태 분석
+                if "t_total" in s:
+                    safe_print(f"    ┌─ 종료시트 {s['t_total']}행 분석 ─────────────")
+                    safe_print(f"    │ 빈 행:          {s.get('t_empty_rows', '?')}건")
+                    safe_print(f"    │ 지점명 없음:     {s.get('t_no_branch', '?')}건")
+                    safe_print(f"    │ 지점명 있음:     {s.get('t_has_branch', '?')}건")
+                    safe_print(f"    │ → 정산에 있는 지점: {s.get('t_branch_in_settlement', '?')}건")
+                    safe_print(f"    │ → 이름도 있음:     {s.get('t_has_name', '?')}건")
+                    safe_print(f"    │ → 매칭 가능:       {s.get('t_matchable', '?')}건 ← 실제 매칭 대상")
+                    safe_print(f"    │ 날짜 밀림 보정:   {s.get('t_date_shift_corrected', 0)}건")
+                    safe_print(f"    └──────────────────────────────")
+                if "branch_comparison" in s and s["branch_comparison"]:
+                    safe_print(f"    [공통 지점별 행 수]")
+                    for bc in s["branch_comparison"]:
+                        safe_print(f"      {bc['branch'][:25]:25s} 종료={bc['t_rows']:4d} 정산={bc['s_rows']:4d}")
+                if "t_only_branches" in s and s["t_only_branches"]:
+                    safe_print(f"    [매칭 불가 지점 (종료에만 존재)]")
+                    for tb in s["t_only_branches"]:
+                        safe_print(f"      {tb['branch'][:35]:35s} 종료={tb['t_rows']:4d}건")
+                if "matchable_samples" in s and s["matchable_samples"]:
+                    safe_print(f"    [매칭 가능 샘플]")
+                    for ms in s["matchable_samples"]:
+                        safe_print(f"      {ms.get('branch','')[:15]} / {ms.get('name','')[:10]} / {ms.get('room','')}")
                 if "error" in s: extras.append(f"ERR={s['error'][:80]}")
                 if s.get("tb"): extras.append(f"TB={s['tb'][:80]}")
 

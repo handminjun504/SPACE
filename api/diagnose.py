@@ -87,56 +87,116 @@ class handler(BaseHTTPRequestHandler):
         if mode == "full" and term_url:
             # 데이터 품질 분석
             from _lib.matcher import (
-                normalize_text, normalize_date_str, get_col,
+                normalize_text, normalize_name, normalize_date_str, get_col,
                 _get_termination_dates, _prepare_termination,
+                extract_name,
             )
+
+            # ===== 종료 시트 행 상태 분석 =====
+            t_empty = 0          # 완전히 빈 행
+            t_no_branch = 0      # 지점명 없음
+            t_has_branch = 0     # 지점명 있음
+            t_branch_in_s = 0    # 정산에도 있는 지점
+            t_has_name = 0       # 이름 있음
+            t_matchable = 0      # 지점+이름 둘 다 있고 지점이 정산에 존재
+
             s_branches = set(normalize_text(get_col(r, "지점명")) for r in s_data if get_col(r, "지점명").strip())
             t_branches = set(normalize_text(get_col(r, "지점명")) for r in t_data if get_col(r, "지점명").strip())
             common_branches = s_branches & t_branches
-            s_has_start = sum(1 for r in s_data if normalize_date_str(get_col(r, "계약시작일자")))
-            s_has_end = sum(1 for r in s_data if normalize_date_str(get_col(r, "계약종료일자")))
 
-            # 종료 시트: 밀림 보정 전/후 날짜 수
+            # 지점별 종료 행 수 세기
+            from collections import Counter
+            t_branch_counts = Counter()
+            t_branch_in_s_counts = Counter()
+
+            for r in t_data:
+                branch_raw = get_col(r, "지점명").strip()
+                name_raw = extract_name(r, "계약자명", ["주민 번호", "상호"]).strip()
+                branch_norm = normalize_text(branch_raw)
+
+                # 행이 완전히 비어있는지
+                all_empty = all(not str(v).strip() for v in r.values())
+                if all_empty:
+                    t_empty += 1
+                    continue
+
+                if not branch_raw:
+                    t_no_branch += 1
+                    continue
+
+                t_has_branch += 1
+                t_branch_counts[branch_norm] += 1
+
+                if branch_norm in common_branches:
+                    t_branch_in_s += 1
+                    t_branch_in_s_counts[branch_norm] += 1
+
+                if name_raw:
+                    t_has_name += 1
+                    if branch_norm in common_branches:
+                        t_matchable += 1
+
+            # 정산 시트 지점별 행 수
+            s_branch_counts = Counter()
+            for r in s_data:
+                bn = normalize_text(get_col(r, "지점명"))
+                if bn:
+                    s_branch_counts[bn] += 1
+
+            # 공통 지점별 종료/정산 행 수 비교
+            branch_comparison = []
+            for b in sorted(common_branches):
+                branch_comparison.append({
+                    "branch": b[:30],
+                    "t_rows": t_branch_in_s_counts.get(b, 0),
+                    "s_rows": s_branch_counts.get(b, 0),
+                })
+
+            # 매칭 불가 지점 (종료에만 있는)
+            t_only_branches = []
+            for b in sorted(t_branches - common_branches):
+                t_only_branches.append({
+                    "branch": b[:40],
+                    "t_rows": t_branch_counts.get(b, 0),
+                })
+
+            # 날짜 관련 (간략화)
             t_raw_start = sum(1 for r in t_data if normalize_date_str(get_col(r, "계약 시작 날짜")))
             t_raw_end = sum(1 for r in t_data if normalize_date_str(get_col(r, "계약 만기 날짜")))
             _, t_stats = _prepare_termination(t_data)
-            t_corrected_has_start = sum(1 for s, e in [_get_termination_dates(r) for r in t_data] if s)
-            t_corrected_has_end = sum(1 for s, e in [_get_termination_dates(r) for r in t_data] if e)
 
-            # 밀림 샘플 (처음 3건)
-            shift_samples = []
+            # 매칭 가능한 행에서 이름 샘플 (처음 5개)
+            matchable_samples = []
             for r in t_data:
-                raw_s = get_col(r, "계약 시작 날짜")
-                raw_e = get_col(r, "계약 만기 날짜")
-                corr_s, corr_e = _get_termination_dates(r)
-                if not normalize_date_str(raw_s) and normalize_date_str(raw_e) and corr_s == normalize_date_str(raw_e):
-                    shift_samples.append({
-                        "row_name": get_col(r, "계약자명")[:10],
-                        "S_raw": raw_s[:20],
-                        "T_raw": raw_e[:20],
-                        "corrected_start": corr_s,
-                        "corrected_end": corr_e,
+                branch_norm = normalize_text(get_col(r, "지점명"))
+                name = extract_name(r, "계약자명", ["주민 번호", "상호"]).strip()
+                if branch_norm in common_branches and name and len(matchable_samples) < 5:
+                    matchable_samples.append({
+                        "branch": get_col(r, "지점명")[:20],
+                        "name": name[:15],
+                        "room": get_col(r, "호실")[:10],
                     })
-                    if len(shift_samples) >= 3:
-                        break
-
-            # 종료 시트 헤더 (S/T/U 주변)
-            t_headers = list(t_data[0].keys()) if t_data else []
 
             steps.append({
                 "step": "4b_data_quality", "ok": True,
-                "s_branches": len(s_branches), "t_branches": len(t_branches),
-                "common_branches": len(common_branches),
-                "branch_overlap_pct": round(len(common_branches) / max(len(t_branches), 1) * 100, 1),
-                "s_has_start_date": s_has_start, "s_has_end_date": s_has_end,
-                "t_raw_start_date": t_raw_start, "t_raw_end_date": t_raw_end,
-                "t_corrected_start_date": t_corrected_has_start,
-                "t_corrected_end_date": t_corrected_has_end,
+                # 행 상태 분석
+                "t_total": len(t_data),
+                "t_empty_rows": t_empty,
+                "t_no_branch": t_no_branch,
+                "t_has_branch": t_has_branch,
+                "t_branch_in_settlement": t_branch_in_s,
+                "t_has_name": t_has_name,
+                "t_matchable": t_matchable,
+                # 지점 분석
+                "s_branch_count": len(s_branches),
+                "t_branch_count": len(t_branches),
+                "common_branch_count": len(common_branches),
+                "branch_comparison": branch_comparison,
+                "t_only_branches": t_only_branches,
+                # 날짜
                 "t_date_shift_corrected": t_stats["date_shift_corrected"],
-                "t_headers": t_headers,
-                "shift_samples": shift_samples,
-                "sample_common_branches": sorted(list(common_branches))[:10],
-                "sample_t_only": sorted(list(t_branches - s_branches))[:5],
+                # 샘플
+                "matchable_samples": matchable_samples,
                 "elapsed_s": elapsed(),
             })
 
